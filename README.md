@@ -46,11 +46,20 @@ Peek is a standalone macOS menu bar application that exposes your Mac's webcam a
 
 ## Quick Start
 
-### Installation
+### Install via Homebrew (recommended)
+
+```bash
+brew install peek
+open Peek.app
+```
+
+> **Note:** A pre-built formula will be available once V1.0 is released. Track progress in [CHANGELOG.md](CHANGELOG.md).
+
+### Build from source
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-username/peek.git
+git clone https://github.com/guajardo/peek.git
 cd peek
 
 # Build
@@ -59,8 +68,6 @@ swift build -c release
 # Create app bundle (macOS)
 make app
 ```
-
-Or download the pre-built `.app` from releases.
 
 ### Configure your MCP client
 
