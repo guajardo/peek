@@ -1,0 +1,29 @@
+# Build artifacts
+.build/
+*.o
+*.swiftdoc
+*.swiftsourceinfo
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+
+# App bundles
+*.app/
+Peek.app/
+
+# Logs (user-generated at runtime)
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / local config (user must set these manually)
+config.json
