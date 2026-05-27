@@ -25,5 +25,8 @@ Peek.app/
 .DS_Store
 Thumbs.db
 
+# Private docs (internal planning, specs, roadmaps)
+docs/
+
 # Secrets / local config (user must set these manually)
 config.json
