@@ -3,8 +3,14 @@ import AppKit
 @main
 struct PeekApp {
     static func main() {
+        let args = CommandLine.arguments
+        let autoStart = args.contains("--start-server") || args.contains("-s")
+
         let app = NSApplication.shared
         let delegate = AppDelegate()
+        if autoStart {
+            delegate.autoStartServer = true
+        }
         app.delegate = delegate
         app.run()
     }
@@ -13,9 +19,17 @@ struct PeekApp {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let mcpServer = MCPServer()
+    var autoStartServer = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
+        if autoStartServer {
+            do {
+                try mcpServer.start()
+            } catch {
+                // Fall through - menu will show stopped state
+            }
+        }
         updateMenu()
     }
 

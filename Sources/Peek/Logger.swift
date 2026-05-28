@@ -7,9 +7,12 @@ final class Logger {
     private let queue = DispatchQueue(label: "com.peek.logger")
 
     private init() {
-        let logDir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
+        guard let logDir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
             .appendingPathComponent("Logs")
-            .appendingPathComponent("Peek")
+            .appendingPathComponent("Peek") else {
+            logURL = URL(fileURLWithPath: "/tmp/Peek/captures.log")
+            return
+        }
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
         logURL = logDir.appendingPathComponent("captures.log")
     }
@@ -26,20 +29,22 @@ final class Logger {
 
         queue.async { [weak self] in
             guard let self = self else { return }
-            if let data = try? JSONSerialization.data(withJSONObject: entry),
-               let line = String(data: data, encoding: .utf8) {
+            do {
+                let data = try JSONSerialization.data(withJSONObject: entry)
+                guard let line = String(data: data, encoding: .utf8) else { return }
                 let lineWithNewline = line + "\n"
-                if let lineData = lineWithNewline.data(using: .utf8) {
-                    if FileManager.default.fileExists(atPath: self.logURL.path) {
-                        if let handle = FileHandle(forWritingAtPath: self.logURL.path) {
-                            handle.seekToEndOfFile()
-                            handle.write(lineData)
-                            handle.closeFile()
-                        }
-                    } else {
-                        try? lineData.write(to: self.logURL)
+                guard let lineData = lineWithNewline.data(using: .utf8) else { return }
+                if FileManager.default.fileExists(atPath: self.logURL.path) {
+                    if let handle = FileHandle(forWritingAtPath: self.logURL.path) {
+                        handle.seekToEndOfFile()
+                        try? handle.write(lineData)
+                        handle.closeFile()
                     }
+                } else {
+                    try? lineData.write(to: self.logURL)
                 }
+            } catch {
+                // Silently ignore logging errors
             }
         }
     }

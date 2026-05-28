@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import Network
 
 final class MCPServer {
@@ -7,21 +8,28 @@ final class MCPServer {
         case running(port: UInt16)
     }
 
+    private final class ConnectionContext {
+        var buffer = Data()
+    }
+
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.peek.mcp.server")
     private(set) var state: ServerState = .stopped
 
     private let camera = Camera.shared
+    private let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
     // MARK: - Server Lifecycle
 
     func start(port: UInt16 = 8765) throws {
+        print("[MCPServer] start() called with port \(port)")
         guard listener == nil else { return }
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
 
         let nwListener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
         nwListener.stateUpdateHandler = { [weak self] state in
+            print("[MCPServer] listener state changed to: \(state)")
             switch state {
             case .ready:
                 self?.state = .running(port: port)
@@ -34,10 +42,12 @@ final class MCPServer {
         }
 
         nwListener.newConnectionHandler = { [weak self] connection in
+            print("[MCPServer] new connection received")
             self?.handle(connection: connection)
         }
 
         listener = nwListener
+        print("[MCPServer] starting listener on port \(port)")
         nwListener.start(queue: queue)
         state = .running(port: port)
     }
@@ -51,65 +61,166 @@ final class MCPServer {
     // MARK: - Connection Handling
 
     private func handle(connection: NWConnection) {
+        print("[MCPServer] handle() called, connection state: \(connection.state)")
+        let context = ConnectionContext()
         connection.stateUpdateHandler = { state in
+            print("[MCPServer] connection state changed to: \(state)")
             switch state {
             case .ready:
-                self.receive(on: connection)
-            default:
+                self.receive(on: connection, context: context)
+            case .failed(let err):
+                print("[MCPServer] connection failed: \(err)")
                 connection.cancel()
+            case .cancelled:
+                print("[MCPServer] connection cancelled")
+            default:
+                print("[MCPServer] connection in unexpected state, not cancelling yet")
             }
         }
         connection.start(queue: queue)
     }
 
-    private func receive(on connection: NWConnection) {
+    private func receive(on connection: NWConnection, context: ConnectionContext) {
+        print("[MCPServer] receive() called")
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+            print("[MCPServer] receive callback - data: \(data?.count ?? 0) bytes, error: \(String(describing: error))")
             if let data = data, !data.isEmpty {
-                self?.process(data: data, connection: connection)
+                context.buffer.append(data)
+                while let requestData = self?.nextHTTPRequest(from: context) {
+                    self?.process(data: requestData, connection: connection)
+                }
             }
             if isComplete || error != nil {
                 connection.cancel()
             } else {
-                self?.receive(on: connection)
+                self?.receive(on: connection, context: context)
             }
         }
     }
 
+    private func nextHTTPRequest(from context: ConnectionContext) -> Data? {
+        let headerSeparator = Data([13, 10, 13, 10])
+        guard let separatorRange = context.buffer.range(of: headerSeparator) else {
+            return nil
+        }
+
+        let headerEnd = separatorRange.upperBound
+        let headerData = context.buffer.prefix(separatorRange.lowerBound)
+        guard let headerText = String(data: headerData, encoding: .utf8) else {
+            context.buffer.removeAll()
+            return nil
+        }
+
+        var contentLength = 0
+        for line in headerText.components(separatedBy: "\r\n").dropFirst() {
+            if line.lowercased().hasPrefix("content-length:") {
+                let value = line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
+                contentLength = Int(value) ?? 0
+                break
+            }
+        }
+
+        let requestLength = headerEnd + contentLength
+        guard context.buffer.count >= requestLength else {
+            return nil
+        }
+
+        let requestData = Data(context.buffer.prefix(requestLength))
+        context.buffer.removeSubrange(0..<requestLength)
+        return requestData
+    }
+
     private func process(data: Data, connection: NWConnection) {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let method = json["method"] as? String else {
-            self.sendError(connection: connection, code: -32700, message: "Parse error")
+        guard let requestText = String(data: data, encoding: .utf8) else {
+            self.sendHTTPError(connection: connection, code: 400, message: "Bad Request")
+            return
+        }
+
+        let lines = requestText.components(separatedBy: "\r\n")
+        guard !lines.isEmpty else {
+            self.sendHTTPError(connection: connection, code: 400, message: "Bad Request")
+            return
+        }
+
+        let requestLine = lines[0]
+        let parts = requestLine.split(separator: " ", maxSplits: 1)
+        guard parts.count >= 2 else {
+            self.sendHTTPError(connection: connection, code: 400, message: "Bad Request")
+            return
+        }
+
+        let method = String(parts[0])
+        let pathAndVersion = String(parts[1])
+        let path = pathAndVersion.split(separator: " ").first.map(String.init) ?? pathAndVersion
+
+        guard path == "/mcp" else {
+            self.sendHTTPError(connection: connection, code: 404, message: "Not Found")
+            return
+        }
+
+        guard method == "POST" else {
+            self.sendHTTPError(connection: connection, code: 405, message: "Method Not Allowed")
+            return
+        }
+
+        let bodyStartIndex = requestText.range(of: "\r\n\r\n")?.upperBound
+        let bodyString: String
+        if let start = bodyStartIndex {
+            bodyString = String(requestText[start...])
+        } else {
+            bodyString = ""
+        }
+
+        guard let bodyData = bodyString.data(using: .utf8) else {
+            self.sendHTTPError(connection: connection, code: 400, message: "Bad Request")
+            return
+        }
+
+        guard let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
+            self.sendHTTPError(connection: connection, code: 400, message: "Bad Request")
             return
         }
 
         let id = json["id"]
+        let hasID = json.keys.contains("id")
+        let methodName = json["method"] as? String
         let params = json["params"] as? [String: Any]
 
-        let response: [String: Any]
-
-        switch method {
-        case "initialize":
-            response = handleInitialize(id: id)
-        case "tools/list":
-            response = handleToolsList(id: id)
-        case "tools/call":
-            response = handleToolCall(id: id, params: params)
-        default:
-            sendError(connection: connection, code: -32601, message: "Method not found", id: id)
+        if !hasID, methodName?.hasPrefix("notifications/") == true {
+            sendHTTPAccepted(connection: connection)
             return
         }
 
-        send(response: response, connection: connection)
+        guard let methodName else {
+            self.sendHTTPError(connection: connection, code: 400, message: "Bad Request")
+            return
+        }
+
+        switch methodName {
+        case "initialize":
+            sendHTTP(response: handleInitialize(id: id, params: params), connection: connection)
+        case "tools/list":
+            sendHTTP(response: handleToolsList(id: id), connection: connection)
+        case "tools/call":
+            sendHTTP(response: handleToolCall(id: id, params: params), connection: connection)
+        default:
+            sendHTTPError(connection: connection, code: 404, message: "Method not found", id: id)
+        }
     }
 
     // MARK: - MCP Protocol
 
-    private func handleInitialize(id: Any?) -> [String: Any] {
+    private func handleInitialize(id: Any?, params: [String: Any]?) -> [String: Any] {
+        let requestedVersion = params?["protocolVersion"] as? String
+        let protocolVersion = supportedProtocolVersions.contains(requestedVersion ?? "")
+            ? requestedVersion!
+            : supportedProtocolVersions[0]
+
         return [
             "jsonrpc": "2.0",
             "id": id as Any,
             "result": [
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": protocolVersion,
                 "capabilities": [:],
                 "serverInfo": [
                     "name": "Peek",
@@ -205,14 +316,11 @@ final class MCPServer {
     // MARK: - Tool Handlers
 
     private func handlePing(id: Any?, arguments: [String: Any]) -> [String: Any] {
-        return [
-            "jsonrpc": "2.0",
-            "id": id as Any,
-            "result": [
-                "ok": true,
-                "timestamp": ISO8601DateFormatter().string(from: Date())
-            ]
+        let payload: [String: Any] = [
+            "ok": true,
+            "timestamp": ISO8601DateFormatter().string(from: Date())
         ]
+        return toolResultResponse(id: id, payload: payload)
     }
 
     private func handleCameraStatus(id: Any?, arguments: [String: Any]) -> [String: Any] {
@@ -224,15 +332,13 @@ final class MCPServer {
             serverRunning = false
         }
 
-        return [
-            "jsonrpc": "2.0",
-            "id": id as Any,
-            "result": [
-                "ok": true,
-                "server_running": serverRunning,
-                "camera_permission": String(describing: permStatus).lowercased()
-            ]
+        let payload: [String: Any] = [
+            "ok": true,
+            "server_running": serverRunning,
+            "camera_permission": String(describing: permStatus).lowercased(),
+            "camera_active": camera.isActive()
         ]
+        return toolResultResponse(id: id, payload: payload)
     }
 
     private func handleSnapshot(id: Any?, arguments: [String: Any]) -> [String: Any] {
@@ -245,30 +351,24 @@ final class MCPServer {
         camera.takeSnapshot(quality: quality) { result in
             switch result {
             case .success(let url):
-                response = [
-                    "jsonrpc": "2.0",
-                    "id": id as Any,
-                    "result": [
-                        "ok": true,
-                        "image_path": url.path,
-                        "width": 1920,
-                        "height": 1080
-                    ]
+                let dimensions = self.imageDimensions(at: url) ?? (width: 1920, height: 1080)
+                let payload: [String: Any] = [
+                    "ok": true,
+                    "image_path": url.path,
+                    "width": dimensions.width,
+                    "height": dimensions.height
                 ]
+                response = self.toolResultResponse(id: id, payload: payload)
             case .failure(let error):
-                response = [
-                    "jsonrpc": "2.0",
-                    "id": id as Any,
-                    "result": [
-                        "ok": false,
-                        "error": error.localizedDescription
-                    ]
-                ]
+                response = self.toolErrorResponse(id: id, message: String(describing: error))
             }
             sem.signal()
         }
 
-        sem.wait()
+        let timeoutResult = sem.wait(timeout: .now() + 10)
+        if timeoutResult == .timedOut {
+            return toolErrorResponse(id: id, message: "Operation timed out")
+        }
         return response
     }
 
@@ -279,29 +379,22 @@ final class MCPServer {
         camera.startRecording { result in
             switch result {
             case .success(let (recordingID, startedAt)):
-                response = [
-                    "jsonrpc": "2.0",
-                    "id": id as Any,
-                    "result": [
-                        "ok": true,
-                        "recording_id": recordingID.uuidString,
-                        "started_at": ISO8601DateFormatter().string(from: startedAt)
-                    ]
+                let payload: [String: Any] = [
+                    "ok": true,
+                    "recording_id": recordingID.uuidString,
+                    "started_at": ISO8601DateFormatter().string(from: startedAt)
                 ]
+                response = self.toolResultResponse(id: id, payload: payload)
             case .failure(let error):
-                response = [
-                    "jsonrpc": "2.0",
-                    "id": id as Any,
-                    "result": [
-                        "ok": false,
-                        "error": error.localizedDescription
-                    ]
-                ]
+                response = self.toolErrorResponse(id: id, message: String(describing: error))
             }
             sem.signal()
         }
 
-        sem.wait()
+        let timeoutResult = sem.wait(timeout: .now() + 10)
+        if timeoutResult == .timedOut {
+            return toolErrorResponse(id: id, message: "Operation timed out")
+        }
         return response
     }
 
@@ -317,29 +410,22 @@ final class MCPServer {
         camera.stopRecording(recordingID: recordingID) { result in
             switch result {
             case .success(let (url, duration)):
-                response = [
-                    "jsonrpc": "2.0",
-                    "id": id as Any,
-                    "result": [
-                        "ok": true,
-                        "video_path": url.path,
-                        "duration_seconds": duration
-                    ]
+                let payload: [String: Any] = [
+                    "ok": true,
+                    "video_path": url.path,
+                    "duration_seconds": duration
                 ]
+                response = self.toolResultResponse(id: id, payload: payload)
             case .failure(let error):
-                response = [
-                    "jsonrpc": "2.0",
-                    "id": id as Any,
-                    "result": [
-                        "ok": false,
-                        "error": error.localizedDescription
-                    ]
-                ]
+                response = self.toolErrorResponse(id: id, message: String(describing: error))
             }
             sem.signal()
         }
 
-        sem.wait()
+        let timeoutResult = sem.wait(timeout: .now() + 10)
+        if timeoutResult == .timedOut {
+            return toolErrorResponse(id: id, message: "Operation timed out")
+        }
         return response
     }
 
@@ -355,33 +441,73 @@ final class MCPServer {
             switch result {
             case .success(let framesData):
                 let base64Frames = framesData.map { $0.base64EncodedString() }
-                response = [
-                    "jsonrpc": "2.0",
-                    "id": id as Any,
-                    "result": [
-                        "ok": true,
-                        "frames": base64Frames,
-                        "count": base64Frames.count
-                    ]
+                let payload: [String: Any] = [
+                    "ok": true,
+                    "frames": base64Frames,
+                    "count": base64Frames.count
                 ]
+                response = self.toolResultResponse(id: id, payload: payload)
             case .failure(let error):
-                response = [
-                    "jsonrpc": "2.0",
-                    "id": id as Any,
-                    "result": [
-                        "ok": false,
-                        "error": error.localizedDescription
-                    ]
-                ]
+                response = self.toolErrorResponse(id: id, message: String(describing: error))
             }
             sem.signal()
         }
 
-        sem.wait()
+        let timeoutResult = sem.wait(timeout: .now() + 10)
+        if timeoutResult == .timedOut {
+            return toolErrorResponse(id: id, message: "Operation timed out")
+        }
         return response
     }
 
     // MARK: - Response Helpers
+
+    private func toolResultResponse(id: Any?, payload: [String: Any], isError: Bool = false) -> [String: Any] {
+        return [
+            "jsonrpc": "2.0",
+            "id": id as Any,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": jsonString(payload)
+                    ]
+                ],
+                "structuredContent": payload,
+                "isError": isError
+            ]
+        ]
+    }
+
+    private func toolErrorResponse(id: Any?, message: String) -> [String: Any] {
+        return toolResultResponse(
+            id: id,
+            payload: [
+                "ok": false,
+                "error": message
+            ],
+            isError: true
+        )
+    }
+
+    private func jsonString(_ value: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+              let string = String(data: data, encoding: .utf8) else {
+            return String(describing: value)
+        }
+        return string
+    }
+
+    private func imageDimensions(at url: URL) -> (width: Int, height: Int)? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int else {
+            return nil
+        }
+        return (width, height)
+    }
 
     private func errorResponse(id: Any?, code: Int, message: String) -> [String: Any] {
         return [
@@ -394,21 +520,65 @@ final class MCPServer {
         ]
     }
 
-    private func sendError(connection: NWConnection, code: Int, message: String, id: Any? = nil) {
-        let resp: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id as Any,
-            "error": ["code": code, "message": message]
-        ]
-        send(response: resp, connection: connection)
+    private func sendHTTPError(connection: NWConnection, code: Int, message: String, id: Any? = nil) {
+        let httpCode: String
+        switch code {
+        case 400: httpCode = "400 Bad Request"
+        case 404: httpCode = "404 Not Found"
+        case 405: httpCode = "405 Method Not Allowed"
+        case 500: httpCode = "500 Internal Server Error"
+        default: httpCode = "\(code)"
+        }
+
+        let body: String
+        if let id = id {
+            let jsonResp = try? JSONSerialization.data(withJSONObject: ["jsonrpc": "2.0", "id": id, "error": ["code": code, "message": message]])
+            body = String(data: jsonResp ?? Data(), encoding: .utf8) ?? ""
+        } else {
+            body = ""
+        }
+
+        let response = "HTTP/1.1 \(httpCode)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
+        if let data = response.data(using: .utf8) {
+            connection.send(content: data, completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+        } else {
+            connection.cancel()
+        }
+    }
+
+    private func sendHTTPAccepted(connection: NWConnection) {
+        let response = "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n"
+        if let data = response.data(using: .utf8) {
+            connection.send(content: data, completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+        } else {
+            connection.cancel()
+        }
+    }
+
+    private func sendHTTP(response: [String: Any], connection: NWConnection) {
+        guard let data = try? JSONSerialization.data(withJSONObject: response) else {
+            connection.cancel()
+            return
+        }
+
+        let bodyString = String(data: data, encoding: .utf8) ?? ""
+        let httpResponse = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(bodyString.utf8.count)\r\n\r\n\(bodyString)"
+        if let httpData = httpResponse.data(using: .utf8) {
+            connection.send(content: httpData, completion: .contentProcessed { error in
+                if error != nil {
+                    connection.cancel()
+                }
+            })
+        } else {
+            connection.cancel()
+        }
     }
 
     private func send(response: [String: Any], connection: NWConnection) {
-        guard let data = try? JSONSerialization.data(withJSONObject: response) else { return }
-        connection.send(content: data, completion: .contentProcessed { error in
-            if error != nil {
-                connection.cancel()
-            }
-        })
+        sendHTTP(response: response, connection: connection)
     }
 }

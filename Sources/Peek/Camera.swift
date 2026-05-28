@@ -31,9 +31,14 @@ final class Camera {
     static let shared = Camera()
 
     private var session: AVCaptureSession?
+    private var captureDevice: AVCaptureDevice?
+    private var selectedVideoDimensions: CMVideoDimensions?
     private var photoOutput: AVCapturePhotoOutput?
-    private var videoOutput: AVCaptureMovieFileOutput?
-    private var pendingCompletions: [UUID: (Result<URL, Error>) -> Void] = [:]
+    private var videoOutput: AVCaptureVideoDataOutput?
+    private var photoDelegates: [UUID: PhotoCaptureDelegate] = [:]
+    private var frameDelegates: [UUID: FrameCaptureDelegate] = [:]
+    private var activeRecording: VideoFrameRecorder?
+    private let sessionQueue = DispatchQueue(label: "com.peek.camera.session")
 
     private init() {}
 
@@ -59,51 +64,85 @@ final class Camera {
     // MARK: - Session Management
 
     func startSession() throws {
-        guard session == nil else { return }
-        let sess = AVCaptureSession()
-        sess.sessionPreset = .high
-
-        guard let device = AVCaptureDevice.default(for: .video) else {
-            throw PeekError.cameraNotAvailable
+        let didStart = try startSessionIfNeeded()
+        if didStart {
+            waitForCameraWarmup()
         }
+    }
 
-        let input = try AVCaptureDeviceInput(device: device)
-        guard sess.canAddInput(input) else {
-            throw PeekError.cameraNotAvailable
-        }
-        sess.addInput(input)
+    @discardableResult
+    private func startSessionIfNeeded() throws -> Bool {
+        try sessionQueue.sync {
+            guard session == nil else { return false }
+            let sess = AVCaptureSession()
 
-        let photo = AVCapturePhotoOutput()
-        guard sess.canAddOutput(photo) else {
-            throw PeekError.cameraNotAvailable
-        }
-        sess.addOutput(photo)
-        photoOutput = photo
+            guard let device = AVCaptureDevice.default(for: .video) else {
+                throw PeekError.cameraNotAvailable
+            }
 
-        let video = AVCaptureMovieFileOutput()
-        guard sess.canAddOutput(video) else {
-            throw PeekError.cameraNotAvailable
-        }
-        sess.addOutput(video)
-        videoOutput = video
+            sess.beginConfiguration()
+            if sess.canSetSessionPreset(.photo) {
+                sess.sessionPreset = .photo
+            }
 
-        session = sess
+            let input = try AVCaptureDeviceInput(device: device)
+            guard sess.canAddInput(input) else {
+                throw PeekError.cameraNotAvailable
+            }
+            sess.addInput(input)
 
-        DispatchQueue.global(qos: .userInitiated).async {
+            try configure(device: device)
+
+            let photo = AVCapturePhotoOutput()
+            guard sess.canAddOutput(photo) else {
+                throw PeekError.cameraNotAvailable
+            }
+            sess.addOutput(photo)
+
+            let video = AVCaptureVideoDataOutput()
+            video.alwaysDiscardsLateVideoFrames = true
+            var videoSettings: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+            if let dimensions = selectedVideoDimensions {
+                videoSettings[kCVPixelBufferWidthKey as String] = Int(dimensions.width)
+                videoSettings[kCVPixelBufferHeightKey as String] = Int(dimensions.height)
+            }
+            video.videoSettings = videoSettings
+            guard sess.canAddOutput(video) else {
+                throw PeekError.cameraNotAvailable
+            }
+            sess.addOutput(video)
+
+            sess.commitConfiguration()
+
             sess.startRunning()
+            captureDevice = device
+            session = sess
+            photoOutput = photo
+            videoOutput = video
+
+            return true
         }
     }
 
     func stopSession() {
-        session?.stopRunning()
-        session = nil
-        photoOutput = nil
-        videoOutput = nil
+        sessionQueue.sync {
+            stopSessionOnQueue()
+        }
+    }
+
+    func isActive() -> Bool {
+        sessionQueue.sync {
+            session?.isRunning ?? false
+        }
     }
 
     // MARK: - Snapshot
 
     func takeSnapshot(quality: Quality = .medium, completion: @escaping (Result<URL, Error>) -> Void) {
+        let shouldStopAfterCapture = session == nil
+
         do {
             try ensureSession()
         } catch {
@@ -119,7 +158,19 @@ final class Camera {
         let settings = AVCapturePhotoSettings()
 
         let outputURL = snapshotURL()
-        let delegate = PhotoCaptureDelegate(outputURL: outputURL, completion: completion)
+        let captureID = UUID()
+        let delegate = PhotoCaptureDelegate(outputURL: outputURL) { [weak self] result in
+            completion(result)
+            self?.sessionQueue.async {
+                self?.photoDelegates.removeValue(forKey: captureID)
+                if shouldStopAfterCapture {
+                    self?.stopSessionOnQueue()
+                }
+            }
+        }
+        sessionQueue.sync {
+            photoDelegates[captureID] = delegate
+        }
         photo.capturePhoto(with: settings, delegate: delegate)
     }
 
@@ -140,36 +191,38 @@ final class Camera {
 
         let recordingID = UUID()
         let outputURL = videoURL(for: recordingID)
+        let recorder = VideoFrameRecorder(recordingID: recordingID, outputURL: outputURL)
 
-        let delegate = VideoRecordingDelegate(recordingID: recordingID) { [weak self] result in
-            self?.pendingCompletions.removeValue(forKey: recordingID)
-            completion(result)
+        sessionQueue.sync {
+            activeRecording = recorder
         }
-        pendingCompletions[recordingID] = { _ in }
-        video.startRecording(to: outputURL, recordingDelegate: delegate)
+        video.setSampleBufferDelegate(recorder, queue: recorder.queue)
 
         completion(.success((recordingID, Date())))
     }
 
     func stopRecording(recordingID: UUID, completion: @escaping (Result<(URL, TimeInterval), Error>) -> Void) {
-        guard let video = videoOutput else {
+        let recorder = sessionQueue.sync { activeRecording }
+        guard let recorder = recorder, recorder.recordingID == recordingID else {
             completion(.failure(PeekError.cameraNotAvailable))
             return
         }
 
-        video.stopRecording()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.stopSession()
+        recorder.stop { [weak self] result in
+            completion(result)
+            self?.sessionQueue.async {
+                self?.videoOutput?.setSampleBufferDelegate(nil, queue: nil)
+                self?.activeRecording = nil
+                self?.stopSessionOnQueue()
+            }
         }
-
-        let outputURL = videoURL(for: recordingID)
-        completion(.success((outputURL, 0)))
     }
 
     // MARK: - Frame Burst
 
     func captureFrames(count: Int, quality: Quality = .medium, completion: @escaping (Result<[Data], Error>) -> Void) {
+        let shouldStopAfterCapture = session == nil
+
         do {
             try ensureSession()
         } catch {
@@ -188,8 +241,12 @@ final class Camera {
 
         for _ in 0..<count {
             let settings = AVCapturePhotoSettings()
+            let captureID = UUID()
 
-            let delegate = FrameCaptureDelegate { result in
+            let delegate = FrameCaptureDelegate { [weak self] result in
+                self?.sessionQueue.async {
+                    self?.frameDelegates.removeValue(forKey: captureID)
+                }
                 queue.async {
                     switch result {
                     case .success(let data):
@@ -206,8 +263,16 @@ final class Camera {
                                 completion(.success(frames))
                             }
                         }
+                        if shouldStopAfterCapture {
+                            self?.sessionQueue.async {
+                                self?.stopSessionOnQueue()
+                            }
+                        }
                     }
                 }
+            }
+            sessionQueue.sync {
+                frameDelegates[captureID] = delegate
             }
             photo.capturePhoto(with: settings, delegate: delegate)
         }
@@ -216,10 +281,73 @@ final class Camera {
     // MARK: - Private Helpers
 
     private func ensureSession() throws {
-        if session == nil {
-            try startSession()
+        let didStart = try startSessionIfNeeded()
+        if didStart {
+            waitForCameraWarmup()
         }
-        Thread.sleep(forTimeInterval: 0.3)
+    }
+
+    private func stopSessionOnQueue() {
+        session?.stopRunning()
+        session = nil
+        captureDevice = nil
+        selectedVideoDimensions = nil
+        photoOutput = nil
+        videoOutput?.setSampleBufferDelegate(nil, queue: nil)
+        videoOutput = nil
+        activeRecording = nil
+    }
+
+    private func configure(device: AVCaptureDevice) throws {
+        try device.lockForConfiguration()
+        defer { device.unlockForConfiguration() }
+
+        if let format = preferredFullViewFormat(for: device) {
+            device.activeFormat = format
+        }
+        selectedVideoDimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        if device.isExposureModeSupported(.continuousAutoExposure) {
+            device.exposureMode = .continuousAutoExposure
+        }
+        if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+            device.whiteBalanceMode = .continuousAutoWhiteBalance
+        }
+        if device.isFocusModeSupported(.continuousAutoFocus) {
+            device.focusMode = .continuousAutoFocus
+        }
+    }
+
+    private func preferredFullViewFormat(for device: AVCaptureDevice) -> AVCaptureDevice.Format? {
+        let landscapeFormats = device.formats.filter { format in
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            return dimensions.width >= dimensions.height
+        }
+
+        let fullViewFormats = landscapeFormats.filter { format in
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let aspectRatio = Double(dimensions.width) / Double(dimensions.height)
+            return aspectRatio >= 1.2 && aspectRatio <= 1.5
+        }
+
+        let candidates = fullViewFormats.isEmpty ? landscapeFormats : fullViewFormats
+        return candidates.max { lhs, rhs in
+            let lhsDimensions = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
+            let rhsDimensions = CMVideoFormatDescriptionGetDimensions(rhs.formatDescription)
+            return Int(lhsDimensions.width) * Int(lhsDimensions.height) < Int(rhsDimensions.width) * Int(rhsDimensions.height)
+        }
+    }
+
+    private func waitForCameraWarmup() {
+        Thread.sleep(forTimeInterval: 2.0)
+
+        let deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline {
+            guard let device = captureDevice else { return }
+            if !device.isAdjustingExposure && !device.isAdjustingWhiteBalance {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
     }
 
     private func snapshotURL() -> URL {
@@ -272,23 +400,113 @@ private class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
     }
 }
 
-// MARK: - AVCaptureFileOutputRecordingDelegate
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
 
-private class VideoRecordingDelegate: NSObject, AVCaptureFileOutputRecordingDelegate {
+private final class VideoFrameRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     let recordingID: UUID
-    let completion: (Result<(UUID, Date), Error>) -> Void
+    let outputURL: URL
+    let queue = DispatchQueue(label: "com.peek.camera.video-recorder")
 
-    init(recordingID: UUID, completion: @escaping (Result<(UUID, Date), Error>) -> Void) {
+    private var writer: AVAssetWriter?
+    private var input: AVAssetWriterInput?
+    private var startTime: CMTime?
+    private var lastTime: CMTime?
+    private var isStopping = false
+    private var stopCompletion: ((Result<(URL, TimeInterval), Error>) -> Void)?
+
+    init(recordingID: UUID, outputURL: URL) {
         self.recordingID = recordingID
-        self.completion = completion
+        self.outputURL = outputURL
     }
 
-    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
-        if let error = error {
-            completion(.failure(error))
-        } else {
-            completion(.success((recordingID, Date())))
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard !isStopping else { return }
+
+        do {
+            if writer == nil {
+                try startWriting(with: sampleBuffer)
+            }
+
+            guard let writer = writer,
+                  let input = input,
+                  writer.status == .writing,
+                  input.isReadyForMoreMediaData else {
+                return
+            }
+
+            if input.append(sampleBuffer) {
+                lastTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            } else if let error = writer.error {
+                finish(.failure(error))
+            }
+        } catch {
+            finish(.failure(error))
         }
+    }
+
+    func stop(completion: @escaping (Result<(URL, TimeInterval), Error>) -> Void) {
+        queue.async {
+            self.isStopping = true
+            self.stopCompletion = completion
+
+            guard let writer = self.writer,
+                  let input = self.input,
+                  writer.status == .writing else {
+                self.finish(.failure(PeekError.encodingFailed))
+                return
+            }
+
+            input.markAsFinished()
+            writer.finishWriting {
+                if let error = writer.error {
+                    self.finish(.failure(error))
+                    return
+                }
+
+                let duration: TimeInterval
+                if let startTime = self.startTime, let lastTime = self.lastTime {
+                    duration = max(0, CMTimeGetSeconds(lastTime - startTime))
+                } else {
+                    duration = 0
+                }
+                self.finish(.success((self.outputURL, duration)))
+            }
+        }
+    }
+
+    private func startWriting(with sampleBuffer: CMSampleBuffer) throws {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            throw PeekError.encodingFailed
+        }
+
+        let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription)
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(dimensions.width),
+            AVVideoHeightKey: Int(dimensions.height)
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        input.expectsMediaDataInRealTime = true
+
+        guard writer.canAdd(input) else {
+            throw PeekError.encodingFailed
+        }
+
+        writer.add(input)
+        let startTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        writer.startWriting()
+        writer.startSession(atSourceTime: startTime)
+
+        self.writer = writer
+        self.input = input
+        self.startTime = startTime
+    }
+
+    private func finish(_ result: Result<(URL, TimeInterval), Error>) {
+        guard let completion = stopCompletion else { return }
+        stopCompletion = nil
+        completion(result)
     }
 }
 

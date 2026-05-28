@@ -29,6 +29,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+- MCP Streamable HTTP handshake now accepts `notifications/initialized` with `HTTP 202 Accepted`, negotiates current protocol versions, and buffers HTTP requests until the declared `Content-Length` is available.
+- MCP tool calls now return valid `CallToolResult` payloads with `content`, `structuredContent`, and `isError`; camera capture delegates are retained until callbacks complete to prevent snapshot timeouts.
+- One-shot camera captures now stop the `AVCaptureSession` after snapshot or frame burst completion, and `camera_status` reports `camera_active` for live verification.
+- Camera capture now warms up continuous exposure/white balance before one-shot captures, preventing black snapshots and frame bursts; video recording now uses `AVCaptureVideoDataOutput` plus `AVAssetWriter` so recordings finish reliably and use the widest available stream dimensions exposed by the camera output.
+
 ### Planned
 
 #### V1.1 — Frame Burst
