@@ -28,5 +28,8 @@ Thumbs.db
 # Private docs (internal planning, specs, roadmaps)
 docs/
 
+# Private test scripts
+test/
+
 # Secrets / local config (user must set these manually)
 config.json

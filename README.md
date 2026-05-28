@@ -60,6 +60,8 @@ swift build -c release
 
 ## Configure MCP Client
 
+**Hermes Agent** (already configured — just start Peek):
+
 **Claude Desktop** (`~/.claude.json`):
 ```json
 {
@@ -89,20 +91,23 @@ swift build -c release
 ```
 Peek/
 ├── Sources/Peek/
-│   ├── main.swift
-│   ├── PeekApp.swift
-│   ├── MCPServer.swift
-│   └── Camera.swift
+│   ├── PeekApp.swift      # AppKit status item + menu bar UI
+│   ├── MCPServer.swift    # MCP HTTP/JSON-RPC server via NWListener
+│   ├── Camera.swift       # AVFoundation capture
+│   ├── Logger.swift       # JSONL audit logging
+│   └── PeekError.swift    # Error types
 ├── Resources/
 │   ├── Info.plist
 │   ├── Peek.entitlements
 │   └── Assets.xcassets/
 ├── Package.swift
 ├── PeekFormula.rb
-└── PEEK.md
+├── AGENTS.md              # AI agent guidelines
+├── CHANGELOG.md
+└── README.md
 ```
 
-5 files. No external dependencies.
+5 Swift files. Zero external dependencies.
 
 ---
 
