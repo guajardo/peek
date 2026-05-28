@@ -4,18 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [1.0.0] - 2026-05-28
 
 ### Added
-- Initial project structure
-- Menu bar application with start/stop server control
-- MCP over HTTP on 127.0.0.1:8765
-- `peek_ping` tool for MCP transport debugging
-- `camera_status` tool
-- `camera_list` tool
-- `camera_snapshot` tool (V1 MVP: single photo capture)
-- Audit logging to `~/Library/Logs/Peek/captures.log`
-- JSON configuration via `~/Library/Application Support/Peek/config.json`
+- Menu bar application (LSUIElement, no Dock icon)
+- Start/Stop Server control with status display
+- MCP over HTTP via NWListener on `127.0.0.1:8765/mcp`
+- MCP protocol 2024-11-05 with JSON-RPC transport
+- `peek_ping` tool — debug ping with timestamp
+- `camera_status` tool — server state + camera permission
+- `camera_snapshot` tool — photo capture with quality levels (low/medium/high)
+- `camera_start_recording` tool — start video recording, returns recording_id
+- `camera_stop_recording` tool — stop recording, returns video_path + duration
+- `camera_frames` tool — frame burst capture (1-30 frames, base64 encoded)
+- Photo storage to `~/Library/Application Support/Peek/Captures/snapshot_<ts>.jpg`
+- Video storage to `~/Library/Application Support/Peek/Captures/video_<ts>.mp4`
+- JSONL audit logging to `~/Library/Logs/Peek/captures.log`
+- Homebrew formula (`PeekFormula.rb`) for `brew install guajardo/tap/peek`
+
+### Technical
+- Zero external dependencies (Swift stdlib + AVFoundation + Network)
+- Headless AVCaptureSession (no preview window)
+- Swift Package Manager build: `swift build -c release`
+
+## [Unreleased]
 
 ### Planned
 
