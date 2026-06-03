@@ -177,6 +177,14 @@ final class Camera {
     // MARK: - Video Recording
 
     func startRecording(completion: @escaping (Result<(UUID, Date), Error>) -> Void) {
+        let isRecording = sessionQueue.sync {
+            activeRecording != nil
+        }
+        guard !isRecording else {
+            completion(.failure(PeekError.cameraBusy))
+            return
+        }
+
         do {
             try ensureSession()
         } catch {

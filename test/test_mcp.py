@@ -218,3 +218,20 @@ for tool_name in ("camera_snapshot", "camera_frames"):
     if result.get("isError") is not True:
         print(f"{tool_name}: expected invalid quality to be rejected, got {result}", file=sys.stderr)
         sys.exit(1)
+
+print("\n=== Test 11: duplicate recording start is rejected ===")
+status_result = call_tool("camera_status", {}, request_id=110)
+status_payload = status_result.get("structuredContent", {})
+if status_payload.get("camera_permission") == "granted":
+    first = call_tool("camera_start_recording", {}, request_id=111)
+    if first.get("isError") is True:
+        print("duplicate recording test skipped: first recording could not start")
+    else:
+        second = call_tool("camera_start_recording", {}, request_id=112)
+        if second.get("isError") is not True:
+            print(f"duplicate recording: expected second start to fail, got {second}", file=sys.stderr)
+            sys.exit(1)
+        recording_id = first["structuredContent"]["recording_id"]
+        call_tool("camera_stop_recording", {"recording_id": recording_id}, request_id=113)
+else:
+    print("duplicate recording test skipped: camera permission is not granted")
