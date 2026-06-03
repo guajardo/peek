@@ -321,7 +321,7 @@ final class MCPServer {
                 "inputSchema": [
                     "type": "object",
                     "properties": [
-                        "count": ["type": "number", "minimum": 1, "maximum": 30, "default": 10],
+                        "count": ["type": "integer", "minimum": 1, "maximum": 30, "default": 10],
                         "quality": ["type": "string", "enum": ["low", "medium", "high"], "default": "medium"]
                     ]
                 ]

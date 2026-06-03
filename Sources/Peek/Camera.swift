@@ -147,11 +147,13 @@ final class Camera {
         let outputURL = snapshotURL()
         let captureID = UUID()
         let delegate = PhotoCaptureDelegate(outputURL: outputURL) { [weak self] result in
-            completion(result)
             self?.sessionQueue.async {
                 self?.photoDelegates.removeValue(forKey: captureID)
                 if shouldStopAfterCapture {
                     self?.stopSessionOnQueue()
+                }
+                DispatchQueue.main.async {
+                    completion(result)
                 }
             }
         }
@@ -205,11 +207,13 @@ final class Camera {
         }
 
         recorder.stop { [weak self] result in
-            completion(result)
             self?.sessionQueue.async {
                 self?.videoOutput?.setSampleBufferDelegate(nil, queue: nil)
                 self?.activeRecording = nil
                 self?.stopSessionOnQueue()
+                DispatchQueue.main.async {
+                    completion(result)
+                }
             }
         }
     }
@@ -257,16 +261,19 @@ final class Camera {
                     }
                     pendingCount -= 1
                     if pendingCount == 0 {
-                        DispatchQueue.main.async {
-                            if frames.isEmpty {
-                                completion(.failure(PeekError.encodingFailed))
-                            } else {
-                                completion(.success(frames))
-                            }
+                        let finalResult: Result<[Data], Error>
+                        if frames.isEmpty {
+                            finalResult = .failure(PeekError.encodingFailed)
+                        } else {
+                            finalResult = .success(frames)
                         }
-                        if shouldStopAfterCapture {
-                            self?.sessionQueue.async {
+
+                        self?.sessionQueue.async {
+                            if shouldStopAfterCapture {
                                 self?.stopSessionOnQueue()
+                            }
+                            DispatchQueue.main.async {
+                                completion(finalResult)
                             }
                         }
                     }
