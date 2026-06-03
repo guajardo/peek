@@ -34,8 +34,10 @@ final class Logger {
                 guard let line = String(data: data, encoding: .utf8) else { return }
                 let lineWithNewline = line + "\n"
                 guard let lineData = lineWithNewline.data(using: .utf8) else { return }
-                if FileManager.default.fileExists(atPath: self.logURL.path),
-                   let handle = FileHandle(forWritingAtPath: self.logURL.path) {
+                if FileManager.default.fileExists(atPath: self.logURL.path) {
+                    guard let handle = FileHandle(forWritingAtPath: self.logURL.path) else {
+                        throw NSError(domain: "Peek.Logger", code: 1)
+                    }
                     defer { try? handle.close() }
                     try handle.seekToEnd()
                     try handle.write(contentsOf: lineData)

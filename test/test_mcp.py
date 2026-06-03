@@ -262,7 +262,11 @@ if status_payload.get("camera_permission") == "granted":
             print(f"duplicate recording: expected Camera is busy error, got {second}", file=sys.stderr)
             sys.exit(1)
         recording_id = first["structuredContent"]["recording_id"]
-        call_tool("camera_stop_recording", {"recording_id": recording_id}, request_id=113)
+        time.sleep(1.0)
+        stop_result = call_tool("camera_stop_recording", {"recording_id": recording_id}, request_id=113)
+        if stop_result.get("isError") is True:
+            print(f"duplicate recording: expected cleanup stop to succeed, got {stop_result}", file=sys.stderr)
+            sys.exit(1)
 else:
     print("duplicate recording test skipped: camera permission is not granted")
 

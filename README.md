@@ -87,7 +87,7 @@ open dist/Peek.app
 ## Tool Behavior
 
 - `camera_snapshot` and `camera_frames` accept `quality` values of `low`, `medium`, or `high`.
-- Quality maps to the requested AVFoundation session preset. The actual dimensions still depend on the camera and macOS capture format; on the current verification machine, both `low` and `high` snapshots returned `1920x1080`.
+- Quality maps to the requested AVFoundation session preset when Peek creates a new capture session. If the camera is already active, the existing session preset is reused. Actual dimensions still depend on the camera and macOS capture format; on the current verification machine, both `low` and `high` snapshots returned `1920x1080`.
 - Invalid `quality` values and invalid frame counts are rejected before camera work starts.
 
 ---
@@ -119,11 +119,12 @@ Peek/
 
 ## Security
 
-- **Local binding only**: 127.0.0.1 — no remote access
-- **Manual start**: Server off by default
-- **Camera permission**: macOS permission prompt is the gate
-- **No microphone**: Audio not captured
-- **Audit log**: All tool calls logged to `~/Library/Logs/Peek/captures.log`
+- Server binds explicitly to `127.0.0.1:8765`; LAN clients cannot connect.
+- No authentication in V1; local MCP clients on the same Mac can call tools while the server is running.
+- Camera permission remains the primary macOS privacy gate.
+- No microphone: audio is not captured.
+- Audit log records tool name, timestamp, success/failure, coarse result metadata, and errors only; it does not log output paths, image/video bytes, or full request payloads.
+- Audit log path: `~/Library/Logs/Peek/captures.log`
 
 ---
 

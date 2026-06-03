@@ -19,9 +19,13 @@ final class MCPServer {
         case payloadTooLarge
     }
 
+    private typealias CameraWork = (@escaping () -> Void) -> Void
+
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.peek.mcp.server")
     private let cameraWorkQueue = DispatchQueue(label: "com.peek.mcp.camera-work", qos: .userInitiated)
+    private var pendingCameraWork: [CameraWork] = []
+    private var isCameraWorkRunning = false
     private(set) var state: ServerState = .stopped
 
     private let camera = Camera.shared
@@ -104,6 +108,7 @@ final class MCPServer {
                     switch self.nextHTTPRequest(from: context) {
                     case .request(let requestData):
                         self.process(data: requestData, connection: connection)
+                        return
                     case .needMoreData:
                         break parseLoop
                     case .badRequest:
@@ -368,6 +373,25 @@ final class MCPServer {
         Logger.shared.log(tool: tool, ok: ok, extras: extras)
     }
 
+    private func enqueueCameraWork(_ work: @escaping CameraWork) {
+        cameraWorkQueue.async {
+            self.pendingCameraWork.append(work)
+            self.startNextCameraWorkIfNeeded()
+        }
+    }
+
+    private func startNextCameraWorkIfNeeded() {
+        guard !isCameraWorkRunning, !pendingCameraWork.isEmpty else { return }
+        isCameraWorkRunning = true
+        let work = pendingCameraWork.removeFirst()
+        work {
+            self.cameraWorkQueue.async {
+                self.isCameraWorkRunning = false
+                self.startNextCameraWorkIfNeeded()
+            }
+        }
+    }
+
     private func handlePing(id: Any?, arguments: [String: Any]) -> [String: Any] {
         let payload: [String: Any] = [
             "ok": true,
@@ -404,13 +428,13 @@ final class MCPServer {
             return
         }
 
-        cameraWorkQueue.async {
+        enqueueCameraWork { finish in
             self.camera.takeSnapshot(quality: quality) { result in
                 let response: [String: Any]
                 switch result {
                 case .success(let url):
                     let dimensions = self.imageDimensions(at: url) ?? (width: 1920, height: 1080)
-                    self.audit(tool: "camera_snapshot", ok: true, extras: ["path": url.path])
+                    self.audit(tool: "camera_snapshot", ok: true)
                     response = self.toolResultResponse(id: id, payload: [
                         "ok": true,
                         "image_path": url.path,
@@ -422,17 +446,18 @@ final class MCPServer {
                     response = self.toolErrorResponse(id: id, message: String(describing: error))
                 }
                 self.sendHTTP(response: response, connection: connection)
+                finish()
             }
         }
     }
 
     private func handleStartRecording(id: Any?, arguments: [String: Any], connection: NWConnection) {
-        cameraWorkQueue.async {
+        enqueueCameraWork { finish in
             self.camera.startRecording { result in
                 let response: [String: Any]
                 switch result {
                 case .success(let (recordingID, startedAt)):
-                    self.audit(tool: "camera_start_recording", ok: true, extras: ["recording_id": recordingID.uuidString])
+                    self.audit(tool: "camera_start_recording", ok: true)
                     response = self.toolResultResponse(id: id, payload: [
                         "ok": true,
                         "recording_id": recordingID.uuidString,
@@ -443,6 +468,7 @@ final class MCPServer {
                     response = self.toolErrorResponse(id: id, message: String(describing: error))
                 }
                 self.sendHTTP(response: response, connection: connection)
+                finish()
             }
         }
     }
@@ -455,12 +481,12 @@ final class MCPServer {
             return
         }
 
-        cameraWorkQueue.async {
+        enqueueCameraWork { finish in
             self.camera.stopRecording(recordingID: recordingID) { result in
                 let response: [String: Any]
                 switch result {
                 case .success(let (url, duration)):
-                    self.audit(tool: "camera_stop_recording", ok: true, extras: ["path": url.path])
+                    self.audit(tool: "camera_stop_recording", ok: true, extras: ["duration_seconds": duration])
                     response = self.toolResultResponse(id: id, payload: [
                         "ok": true,
                         "video_path": url.path,
@@ -471,6 +497,7 @@ final class MCPServer {
                     response = self.toolErrorResponse(id: id, message: String(describing: error))
                 }
                 self.sendHTTP(response: response, connection: connection)
+                finish()
             }
         }
     }
@@ -487,7 +514,7 @@ final class MCPServer {
             return
         }
 
-        cameraWorkQueue.async {
+        enqueueCameraWork { finish in
             self.camera.captureFrames(count: count, quality: quality) { result in
                 let response: [String: Any]
                 switch result {
@@ -504,6 +531,7 @@ final class MCPServer {
                     response = self.toolErrorResponse(id: id, message: String(describing: error))
                 }
                 self.sendHTTP(response: response, connection: connection)
+                finish()
             }
         }
     }
@@ -653,9 +681,7 @@ final class MCPServer {
         let httpResponse = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(bodyString.utf8.count)\r\n\r\n\(bodyString)"
         if let httpData = httpResponse.data(using: .utf8) {
             connection.send(content: httpData, completion: .contentProcessed { error in
-                if error != nil {
-                    connection.cancel()
-                }
+                connection.cancel()
             })
         } else {
             connection.cancel()
