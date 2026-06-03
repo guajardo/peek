@@ -51,6 +51,7 @@ final class Camera {
     // MARK: - Session Management
 
     func startSession() throws {
+        try requestCameraPermissionIfNeeded()
         let didStart = try startSessionIfNeeded()
         if didStart {
             waitForCameraWarmup()
@@ -291,6 +292,7 @@ final class Camera {
     // MARK: - Private Helpers
 
     private func ensureSession(quality: Quality = .medium) throws {
+        try requestCameraPermissionIfNeeded()
         let didStart = try startSessionIfNeeded(quality: quality)
         if didStart {
             waitForCameraWarmup()
@@ -306,6 +308,28 @@ final class Camera {
         videoOutput?.setSampleBufferDelegate(nil, queue: nil)
         videoOutput = nil
         activeRecording = nil
+    }
+
+    private func requestCameraPermissionIfNeeded() throws {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            return
+        case .denied, .restricted:
+            throw PeekError.cameraNotAvailable
+        case .notDetermined:
+            let semaphore = DispatchSemaphore(value: 0)
+            var granted = false
+            AVCaptureDevice.requestAccess(for: .video) { accessGranted in
+                granted = accessGranted
+                semaphore.signal()
+            }
+            semaphore.wait()
+            if !granted {
+                throw PeekError.cameraNotAvailable
+            }
+        @unknown default:
+            throw PeekError.cameraNotAvailable
+        }
     }
 
     private func configure(device: AVCaptureDevice) throws {

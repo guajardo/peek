@@ -1,8 +1,8 @@
 class Peek < Formula
   desc "MCP webcam server for macOS"
   homepage "https://github.com/guajardo/peek"
-  url "https://github.com/guajardo/peek.git", tag: "v1.0.2"
-  version "1.0.2"
+  url "https://github.com/guajardo/peek.git", tag: "v1.0.3"
+  version "1.0.3"
   license "MIT"
 
   depends_on macos: :big_sur
