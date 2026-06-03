@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- Production `.app` bundle build script.
+- Release verification script.
+- Audit logging for tool calls without media bytes or full request payloads.
+
+### Changed
+
+- Clarified installation paths and runtime security guarantees.
+
+### Fixed
+
+- Bound the MCP server explicitly to `127.0.0.1` instead of all interfaces.
+- Rejected invalid camera tool arguments before starting camera work.
+- Kept the MCP server queue responsive during camera operations.
+- Rejected duplicate video recording starts.
+
+### Planned
+
+#### V1.1 — Frame Burst Enhancements
+- Frame burst storage with manifest file
+- Configurable frame interval/delay
+
+#### V1.5 — Auth + Config UI
+- Local token authentication for MCP clients
+- Menu bar configuration UI (quality, storage path)
+- Auto-start preference on login
+
+#### V2.0 — Video + Stream
+- Live stream endpoint (SSE/HTTP streaming)
+- Remote binding option with explicit auth
+- Video clip trimming
+
 ## [1.0.0] - 2026-05-28
 
 ### Added
@@ -36,23 +71,3 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Zero external dependencies (Swift stdlib + AVFoundation + Network)
 - Headless AVCaptureSession (no preview window)
 - Swift Package Manager build: `swift build -c release`
-
----
-
-## [Unreleased]
-
-### Planned
-
-#### V1.1 — Frame Burst Enhancements
-- Frame burst storage with manifest file
-- Configurable frame interval/delay
-
-#### V1.5 — Auth + Config UI
-- Local token authentication for MCP clients
-- Menu bar configuration UI (quality, storage path)
-- Auto-start preference on login
-
-#### V2.0 — Video + Stream
-- Live stream endpoint (SSE/HTTP streaming)
-- Remote binding option with explicit auth
-- Video clip trimming

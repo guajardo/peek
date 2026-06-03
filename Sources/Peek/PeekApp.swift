@@ -4,6 +4,11 @@ import AppKit
 struct PeekApp {
     static func main() {
         let args = CommandLine.arguments
+        if args.contains("--help") || args.contains("-h") {
+            print("Peek MCP webcam server\nUsage: Peek [--start-server]")
+            return
+        }
+
         let autoStart = args.contains("--start-server") || args.contains("-s")
 
         let app = NSApplication.shared

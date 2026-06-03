@@ -19,13 +19,6 @@ final class Camera {
             }
         }
 
-        var compressionQuality: Float {
-            switch self {
-            case .low:    return 0.5
-            case .medium: return 0.7
-            case .high:   return 0.9
-            }
-        }
     }
 
     static let shared = Camera()
@@ -53,14 +46,6 @@ final class Camera {
         }
     }
 
-    func requestPermission(completion: @escaping (Bool) -> Void) {
-        AVCaptureDevice.requestAccess(for: .video) { granted in
-            DispatchQueue.main.async {
-                completion(granted)
-            }
-        }
-    }
-
     // MARK: - Session Management
 
     func startSession() throws {
@@ -71,7 +56,7 @@ final class Camera {
     }
 
     @discardableResult
-    private func startSessionIfNeeded() throws -> Bool {
+    private func startSessionIfNeeded(quality: Quality = .medium) throws -> Bool {
         try sessionQueue.sync {
             guard session == nil else { return false }
             let sess = AVCaptureSession()
@@ -81,7 +66,9 @@ final class Camera {
             }
 
             sess.beginConfiguration()
-            if sess.canSetSessionPreset(.photo) {
+            if sess.canSetSessionPreset(quality.preset) {
+                sess.sessionPreset = quality.preset
+            } else if sess.canSetSessionPreset(.photo) {
                 sess.sessionPreset = .photo
             }
 
@@ -144,7 +131,7 @@ final class Camera {
         let shouldStopAfterCapture = session == nil
 
         do {
-            try ensureSession()
+            try ensureSession(quality: quality)
         } catch {
             completion(.failure(error))
             return
@@ -160,11 +147,13 @@ final class Camera {
         let outputURL = snapshotURL()
         let captureID = UUID()
         let delegate = PhotoCaptureDelegate(outputURL: outputURL) { [weak self] result in
-            completion(result)
             self?.sessionQueue.async {
                 self?.photoDelegates.removeValue(forKey: captureID)
                 if shouldStopAfterCapture {
                     self?.stopSessionOnQueue()
+                }
+                DispatchQueue.main.async {
+                    completion(result)
                 }
             }
         }
@@ -178,7 +167,7 @@ final class Camera {
 
     func startRecording(completion: @escaping (Result<(UUID, Date), Error>) -> Void) {
         do {
-            try ensureSession()
+            try ensureSession(quality: .high)
         } catch {
             completion(.failure(error))
             return
@@ -193,9 +182,18 @@ final class Camera {
         let outputURL = videoURL(for: recordingID)
         let recorder = VideoFrameRecorder(recordingID: recordingID, outputURL: outputURL)
 
-        sessionQueue.sync {
+        let didClaimRecording = sessionQueue.sync {
+            guard activeRecording == nil else {
+                return false
+            }
             activeRecording = recorder
+            return true
         }
+        guard didClaimRecording else {
+            completion(.failure(PeekError.cameraBusy))
+            return
+        }
+
         video.setSampleBufferDelegate(recorder, queue: recorder.queue)
 
         completion(.success((recordingID, Date())))
@@ -209,11 +207,13 @@ final class Camera {
         }
 
         recorder.stop { [weak self] result in
-            completion(result)
             self?.sessionQueue.async {
                 self?.videoOutput?.setSampleBufferDelegate(nil, queue: nil)
                 self?.activeRecording = nil
                 self?.stopSessionOnQueue()
+                DispatchQueue.main.async {
+                    completion(result)
+                }
             }
         }
     }
@@ -221,10 +221,15 @@ final class Camera {
     // MARK: - Frame Burst
 
     func captureFrames(count: Int, quality: Quality = .medium, completion: @escaping (Result<[Data], Error>) -> Void) {
+        guard (1...30).contains(count) else {
+            completion(.failure(PeekError.invalidArguments("count must be an integer from 1 through 30")))
+            return
+        }
+
         let shouldStopAfterCapture = session == nil
 
         do {
-            try ensureSession()
+            try ensureSession(quality: quality)
         } catch {
             completion(.failure(error))
             return
@@ -256,16 +261,19 @@ final class Camera {
                     }
                     pendingCount -= 1
                     if pendingCount == 0 {
-                        DispatchQueue.main.async {
-                            if frames.isEmpty {
-                                completion(.failure(PeekError.encodingFailed))
-                            } else {
-                                completion(.success(frames))
-                            }
+                        let finalResult: Result<[Data], Error>
+                        if frames.isEmpty {
+                            finalResult = .failure(PeekError.encodingFailed)
+                        } else {
+                            finalResult = .success(frames)
                         }
-                        if shouldStopAfterCapture {
-                            self?.sessionQueue.async {
+
+                        self?.sessionQueue.async {
+                            if shouldStopAfterCapture {
                                 self?.stopSessionOnQueue()
+                            }
+                            DispatchQueue.main.async {
+                                completion(finalResult)
                             }
                         }
                     }
@@ -280,8 +288,8 @@ final class Camera {
 
     // MARK: - Private Helpers
 
-    private func ensureSession() throws {
-        let didStart = try startSessionIfNeeded()
+    private func ensureSession(quality: Quality = .medium) throws {
+        let didStart = try startSessionIfNeeded(quality: quality)
         if didStart {
             waitForCameraWarmup()
         }

@@ -12,24 +12,40 @@ final class MCPServer {
         var buffer = Data()
     }
 
+    private enum HTTPRequestReadResult {
+        case request(Data)
+        case needMoreData
+        case badRequest
+        case payloadTooLarge
+    }
+
+    private typealias CameraWork = (@escaping () -> Void) -> Void
+
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.peek.mcp.server")
+    private let cameraWorkQueue = DispatchQueue(label: "com.peek.mcp.camera-work", qos: .userInitiated)
+    private var pendingCameraWork: [CameraWork] = []
+    private var isCameraWorkRunning = false
     private(set) var state: ServerState = .stopped
 
     private let camera = Camera.shared
     private let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
+    private let maxHeaderBytes = 16 * 1024
+    private let maxBodyBytes = 1024 * 1024
+    private let maxBufferedBytes = 1024 * 1024 + 16 * 1024
 
     // MARK: - Server Lifecycle
 
     func start(port: UInt16 = 8765) throws {
-        print("[MCPServer] start() called with port \(port)")
         guard listener == nil else { return }
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
+        let listenPort = NWEndpoint.Port(rawValue: port)!
+        let loopback = IPv4Address("127.0.0.1")!
+        params.requiredLocalEndpoint = .hostPort(host: .ipv4(loopback), port: listenPort)
 
-        let nwListener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
+        let nwListener = try NWListener(using: params)
         nwListener.stateUpdateHandler = { [weak self] state in
-            print("[MCPServer] listener state changed to: \(state)")
             switch state {
             case .ready:
                 self?.state = .running(port: port)
@@ -42,12 +58,10 @@ final class MCPServer {
         }
 
         nwListener.newConnectionHandler = { [weak self] connection in
-            print("[MCPServer] new connection received")
             self?.handle(connection: connection)
         }
 
         listener = nwListener
-        print("[MCPServer] starting listener on port \(port)")
         nwListener.start(queue: queue)
         state = .running(port: port)
     }
@@ -61,73 +75,107 @@ final class MCPServer {
     // MARK: - Connection Handling
 
     private func handle(connection: NWConnection) {
-        print("[MCPServer] handle() called, connection state: \(connection.state)")
         let context = ConnectionContext()
         connection.stateUpdateHandler = { state in
-            print("[MCPServer] connection state changed to: \(state)")
             switch state {
             case .ready:
                 self.receive(on: connection, context: context)
-            case .failed(let err):
-                print("[MCPServer] connection failed: \(err)")
+            case .failed:
                 connection.cancel()
-            case .cancelled:
-                print("[MCPServer] connection cancelled")
             default:
-                print("[MCPServer] connection in unexpected state, not cancelling yet")
+                break
             }
         }
         connection.start(queue: queue)
     }
 
     private func receive(on connection: NWConnection, context: ConnectionContext) {
-        print("[MCPServer] receive() called")
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            print("[MCPServer] receive callback - data: \(data?.count ?? 0) bytes, error: \(String(describing: error))")
+            guard let self else {
+                connection.cancel()
+                return
+            }
+
             if let data = data, !data.isEmpty {
                 context.buffer.append(data)
-                while let requestData = self?.nextHTTPRequest(from: context) {
-                    self?.process(data: requestData, connection: connection)
+                guard context.buffer.count <= self.maxBufferedBytes else {
+                    context.buffer.removeAll()
+                    self.sendHTTPError(connection: connection, code: 413, message: "Payload Too Large")
+                    return
+                }
+
+                parseLoop: while true {
+                    switch self.nextHTTPRequest(from: context) {
+                    case .request(let requestData):
+                        self.process(data: requestData, connection: connection)
+                        return
+                    case .needMoreData:
+                        break parseLoop
+                    case .badRequest:
+                        self.sendHTTPError(connection: connection, code: 400, message: "Bad Request")
+                        return
+                    case .payloadTooLarge:
+                        self.sendHTTPError(connection: connection, code: 413, message: "Payload Too Large")
+                        return
+                    }
                 }
             }
             if isComplete || error != nil {
                 connection.cancel()
             } else {
-                self?.receive(on: connection, context: context)
+                self.receive(on: connection, context: context)
             }
         }
     }
 
-    private func nextHTTPRequest(from context: ConnectionContext) -> Data? {
+    private func nextHTTPRequest(from context: ConnectionContext) -> HTTPRequestReadResult {
         let headerSeparator = Data([13, 10, 13, 10])
         guard let separatorRange = context.buffer.range(of: headerSeparator) else {
-            return nil
+            if context.buffer.count > maxHeaderBytes {
+                context.buffer.removeAll()
+                return .payloadTooLarge
+            }
+            return .needMoreData
+        }
+
+        guard separatorRange.lowerBound <= maxHeaderBytes else {
+            context.buffer.removeAll()
+            return .payloadTooLarge
         }
 
         let headerEnd = separatorRange.upperBound
         let headerData = context.buffer.prefix(separatorRange.lowerBound)
         guard let headerText = String(data: headerData, encoding: .utf8) else {
             context.buffer.removeAll()
-            return nil
+            return .badRequest
         }
 
         var contentLength = 0
         for line in headerText.components(separatedBy: "\r\n").dropFirst() {
             if line.lowercased().hasPrefix("content-length:") {
                 let value = line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
-                contentLength = Int(value) ?? 0
+                guard let parsedContentLength = Int(value) else {
+                    context.buffer.removeAll()
+                    return .badRequest
+                }
+                contentLength = parsedContentLength
                 break
             }
         }
 
+        guard contentLength >= 0 && contentLength <= maxBodyBytes else {
+            context.buffer.removeAll()
+            return .payloadTooLarge
+        }
+
         let requestLength = headerEnd + contentLength
         guard context.buffer.count >= requestLength else {
-            return nil
+            return .needMoreData
         }
 
         let requestData = Data(context.buffer.prefix(requestLength))
         context.buffer.removeSubrange(0..<requestLength)
-        return requestData
+        return .request(requestData)
     }
 
     private func process(data: Data, connection: NWConnection) {
@@ -202,7 +250,7 @@ final class MCPServer {
         case "tools/list":
             sendHTTP(response: handleToolsList(id: id), connection: connection)
         case "tools/call":
-            sendHTTP(response: handleToolCall(id: id, params: params), connection: connection)
+            processToolCall(id: id, params: params, connection: connection)
         default:
             sendHTTPError(connection: connection, code: 404, message: "Method not found", id: id)
         }
@@ -273,7 +321,7 @@ final class MCPServer {
                 "inputSchema": [
                     "type": "object",
                     "properties": [
-                        "count": ["type": "number", "minimum": 1, "maximum": 30, "default": 10],
+                        "count": ["type": "integer", "minimum": 1, "maximum": 30, "default": 10],
                         "quality": ["type": "string", "enum": ["low", "medium", "high"], "default": "medium"]
                     ]
                 ]
@@ -287,33 +335,62 @@ final class MCPServer {
         ]
     }
 
-    private func handleToolCall(id: Any?, params: [String: Any]?) -> [String: Any] {
+    private func processToolCall(id: Any?, params: [String: Any]?, connection: NWConnection) {
         guard let params = params,
               let toolName = params["name"] as? String else {
-            return errorResponse(id: id, code: -32602, message: "Invalid params")
+            sendHTTP(response: errorResponse(id: id, code: -32602, message: "Invalid params"), connection: connection)
+            return
         }
 
         let arguments = params["arguments"] as? [String: Any] ?? [:]
 
         switch toolName {
         case "peek_ping":
-            return handlePing(id: id, arguments: arguments)
+            let response = handlePing(id: id, arguments: arguments)
+            audit(tool: "peek_ping", ok: true)
+            sendHTTP(response: response, connection: connection)
         case "camera_status":
-            return handleCameraStatus(id: id, arguments: arguments)
+            let response = handleCameraStatus(id: id, arguments: arguments)
+            audit(tool: "camera_status", ok: true)
+            sendHTTP(response: response, connection: connection)
         case "camera_snapshot":
-            return handleSnapshot(id: id, arguments: arguments)
+            handleSnapshot(id: id, arguments: arguments, connection: connection)
         case "camera_start_recording":
-            return handleStartRecording(id: id, arguments: arguments)
+            handleStartRecording(id: id, arguments: arguments, connection: connection)
         case "camera_stop_recording":
-            return handleStopRecording(id: id, arguments: arguments)
+            handleStopRecording(id: id, arguments: arguments, connection: connection)
         case "camera_frames":
-            return handleFrames(id: id, arguments: arguments)
+            handleFrames(id: id, arguments: arguments, connection: connection)
         default:
-            return errorResponse(id: id, code: -32601, message: "Tool not found: \(toolName)")
+            audit(tool: toolName, ok: false, extras: ["error": "Tool not found"])
+            sendHTTP(response: errorResponse(id: id, code: -32601, message: "Tool not found: \(toolName)"), connection: connection)
         }
     }
 
     // MARK: - Tool Handlers
+
+    private func audit(tool: String, ok: Bool, extras: [String: Any] = [:]) {
+        Logger.shared.log(tool: tool, ok: ok, extras: extras)
+    }
+
+    private func enqueueCameraWork(_ work: @escaping CameraWork) {
+        cameraWorkQueue.async {
+            self.pendingCameraWork.append(work)
+            self.startNextCameraWorkIfNeeded()
+        }
+    }
+
+    private func startNextCameraWorkIfNeeded() {
+        guard !isCameraWorkRunning, !pendingCameraWork.isEmpty else { return }
+        isCameraWorkRunning = true
+        let work = pendingCameraWork.removeFirst()
+        work {
+            self.cameraWorkQueue.async {
+                self.isCameraWorkRunning = false
+                self.startNextCameraWorkIfNeeded()
+            }
+        }
+    }
 
     private func handlePing(id: Any?, arguments: [String: Any]) -> [String: Any] {
         let payload: [String: Any] = [
@@ -341,123 +418,157 @@ final class MCPServer {
         return toolResultResponse(id: id, payload: payload)
     }
 
-    private func handleSnapshot(id: Any?, arguments: [String: Any]) -> [String: Any] {
-        let qualityStr = arguments["quality"] as? String ?? "medium"
-        let quality = Camera.Quality(rawValue: qualityStr) ?? .medium
+    private func handleSnapshot(id: Any?, arguments: [String: Any], connection: NWConnection) {
+        let quality: Camera.Quality
+        do {
+            quality = try parseQuality(arguments)
+        } catch {
+            audit(tool: "camera_snapshot", ok: false, extras: ["error": String(describing: error)])
+            sendHTTP(response: toolErrorResponse(id: id, message: String(describing: error)), connection: connection)
+            return
+        }
 
-        var response: [String: Any]!
-        let sem = DispatchSemaphore(value: 0)
-
-        camera.takeSnapshot(quality: quality) { result in
-            switch result {
-            case .success(let url):
-                let dimensions = self.imageDimensions(at: url) ?? (width: 1920, height: 1080)
-                let payload: [String: Any] = [
-                    "ok": true,
-                    "image_path": url.path,
-                    "width": dimensions.width,
-                    "height": dimensions.height
-                ]
-                response = self.toolResultResponse(id: id, payload: payload)
-            case .failure(let error):
-                response = self.toolErrorResponse(id: id, message: String(describing: error))
+        enqueueCameraWork { finish in
+            self.camera.takeSnapshot(quality: quality) { result in
+                let response: [String: Any]
+                switch result {
+                case .success(let url):
+                    let dimensions = self.imageDimensions(at: url) ?? (width: 1920, height: 1080)
+                    self.audit(tool: "camera_snapshot", ok: true)
+                    response = self.toolResultResponse(id: id, payload: [
+                        "ok": true,
+                        "image_path": url.path,
+                        "width": dimensions.width,
+                        "height": dimensions.height
+                    ])
+                case .failure(let error):
+                    self.audit(tool: "camera_snapshot", ok: false, extras: ["error": String(describing: error)])
+                    response = self.toolErrorResponse(id: id, message: String(describing: error))
+                }
+                self.sendHTTP(response: response, connection: connection)
+                finish()
             }
-            sem.signal()
         }
-
-        let timeoutResult = sem.wait(timeout: .now() + 10)
-        if timeoutResult == .timedOut {
-            return toolErrorResponse(id: id, message: "Operation timed out")
-        }
-        return response
     }
 
-    private func handleStartRecording(id: Any?, arguments: [String: Any]) -> [String: Any] {
-        var response: [String: Any]!
-        let sem = DispatchSemaphore(value: 0)
-
-        camera.startRecording { result in
-            switch result {
-            case .success(let (recordingID, startedAt)):
-                let payload: [String: Any] = [
-                    "ok": true,
-                    "recording_id": recordingID.uuidString,
-                    "started_at": ISO8601DateFormatter().string(from: startedAt)
-                ]
-                response = self.toolResultResponse(id: id, payload: payload)
-            case .failure(let error):
-                response = self.toolErrorResponse(id: id, message: String(describing: error))
+    private func handleStartRecording(id: Any?, arguments: [String: Any], connection: NWConnection) {
+        enqueueCameraWork { finish in
+            self.camera.startRecording { result in
+                let response: [String: Any]
+                switch result {
+                case .success(let (recordingID, startedAt)):
+                    self.audit(tool: "camera_start_recording", ok: true)
+                    response = self.toolResultResponse(id: id, payload: [
+                        "ok": true,
+                        "recording_id": recordingID.uuidString,
+                        "started_at": ISO8601DateFormatter().string(from: startedAt)
+                    ])
+                case .failure(let error):
+                    self.audit(tool: "camera_start_recording", ok: false, extras: ["error": String(describing: error)])
+                    response = self.toolErrorResponse(id: id, message: String(describing: error))
+                }
+                self.sendHTTP(response: response, connection: connection)
+                finish()
             }
-            sem.signal()
         }
-
-        let timeoutResult = sem.wait(timeout: .now() + 10)
-        if timeoutResult == .timedOut {
-            return toolErrorResponse(id: id, message: "Operation timed out")
-        }
-        return response
     }
 
-    private func handleStopRecording(id: Any?, arguments: [String: Any]) -> [String: Any] {
+    private func handleStopRecording(id: Any?, arguments: [String: Any], connection: NWConnection) {
         guard let recordingIDStr = arguments["recording_id"] as? String,
               let recordingID = UUID(uuidString: recordingIDStr) else {
-            return errorResponse(id: id, code: -32602, message: "Invalid recording_id")
+            audit(tool: "camera_stop_recording", ok: false, extras: ["error": "Invalid recording_id"])
+            sendHTTP(response: errorResponse(id: id, code: -32602, message: "Invalid recording_id"), connection: connection)
+            return
         }
 
-        var response: [String: Any]!
-        let sem = DispatchSemaphore(value: 0)
-
-        camera.stopRecording(recordingID: recordingID) { result in
-            switch result {
-            case .success(let (url, duration)):
-                let payload: [String: Any] = [
-                    "ok": true,
-                    "video_path": url.path,
-                    "duration_seconds": duration
-                ]
-                response = self.toolResultResponse(id: id, payload: payload)
-            case .failure(let error):
-                response = self.toolErrorResponse(id: id, message: String(describing: error))
+        enqueueCameraWork { finish in
+            self.camera.stopRecording(recordingID: recordingID) { result in
+                let response: [String: Any]
+                switch result {
+                case .success(let (url, duration)):
+                    self.audit(tool: "camera_stop_recording", ok: true, extras: ["duration_seconds": duration])
+                    response = self.toolResultResponse(id: id, payload: [
+                        "ok": true,
+                        "video_path": url.path,
+                        "duration_seconds": duration
+                    ])
+                case .failure(let error):
+                    self.audit(tool: "camera_stop_recording", ok: false, extras: ["error": String(describing: error)])
+                    response = self.toolErrorResponse(id: id, message: String(describing: error))
+                }
+                self.sendHTTP(response: response, connection: connection)
+                finish()
             }
-            sem.signal()
         }
-
-        let timeoutResult = sem.wait(timeout: .now() + 10)
-        if timeoutResult == .timedOut {
-            return toolErrorResponse(id: id, message: "Operation timed out")
-        }
-        return response
     }
 
-    private func handleFrames(id: Any?, arguments: [String: Any]) -> [String: Any] {
-        let count = arguments["count"] as? Int ?? 10
-        let qualityStr = arguments["quality"] as? String ?? "medium"
-        let quality = Camera.Quality(rawValue: qualityStr) ?? .medium
+    private func handleFrames(id: Any?, arguments: [String: Any], connection: NWConnection) {
+        let count: Int
+        let quality: Camera.Quality
+        do {
+            count = try parseFrameCount(arguments)
+            quality = try parseQuality(arguments)
+        } catch {
+            audit(tool: "camera_frames", ok: false, extras: ["error": String(describing: error)])
+            sendHTTP(response: toolErrorResponse(id: id, message: String(describing: error)), connection: connection)
+            return
+        }
 
-        var response: [String: Any]!
-        let sem = DispatchSemaphore(value: 0)
-
-        camera.captureFrames(count: count, quality: quality) { result in
-            switch result {
-            case .success(let framesData):
-                let base64Frames = framesData.map { $0.base64EncodedString() }
-                let payload: [String: Any] = [
-                    "ok": true,
-                    "frames": base64Frames,
-                    "count": base64Frames.count
-                ]
-                response = self.toolResultResponse(id: id, payload: payload)
-            case .failure(let error):
-                response = self.toolErrorResponse(id: id, message: String(describing: error))
+        enqueueCameraWork { finish in
+            self.camera.captureFrames(count: count, quality: quality) { result in
+                let response: [String: Any]
+                switch result {
+                case .success(let framesData):
+                    let base64Frames = framesData.map { $0.base64EncodedString() }
+                    self.audit(tool: "camera_frames", ok: true, extras: ["count": base64Frames.count])
+                    response = self.toolResultResponse(id: id, payload: [
+                        "ok": true,
+                        "frames": base64Frames,
+                        "count": base64Frames.count
+                    ])
+                case .failure(let error):
+                    self.audit(tool: "camera_frames", ok: false, extras: ["error": String(describing: error)])
+                    response = self.toolErrorResponse(id: id, message: String(describing: error))
+                }
+                self.sendHTTP(response: response, connection: connection)
+                finish()
             }
-            sem.signal()
+        }
+    }
+
+    private func parseQuality(_ arguments: [String: Any]) throws -> Camera.Quality {
+        guard let value = arguments["quality"] else {
+            return .medium
+        }
+        guard let qualityString = value as? String,
+              let quality = Camera.Quality(rawValue: qualityString) else {
+            throw PeekError.invalidArguments("quality must be one of: low, medium, high")
+        }
+        return quality
+    }
+
+    private func parseFrameCount(_ arguments: [String: Any]) throws -> Int {
+        guard let value = arguments["count"] else {
+            return 10
         }
 
-        let timeoutResult = sem.wait(timeout: .now() + 10)
-        if timeoutResult == .timedOut {
-            return toolErrorResponse(id: id, message: "Operation timed out")
+        let count: Int
+        if let intValue = value as? Int {
+            count = intValue
+        } else if let numberValue = value as? NSNumber, !(value is Bool) {
+            let doubleValue = numberValue.doubleValue
+            guard doubleValue.rounded(.towardZero) == doubleValue else {
+                throw PeekError.invalidArguments("count must be an integer from 1 through 30")
+            }
+            count = numberValue.intValue
+        } else {
+            throw PeekError.invalidArguments("count must be an integer from 1 through 30")
         }
-        return response
+
+        guard (1...30).contains(count) else {
+            throw PeekError.invalidArguments("count must be an integer from 1 through 30")
+        }
+        return count
     }
 
     // MARK: - Response Helpers
@@ -526,6 +637,7 @@ final class MCPServer {
         case 400: httpCode = "400 Bad Request"
         case 404: httpCode = "404 Not Found"
         case 405: httpCode = "405 Method Not Allowed"
+        case 413: httpCode = "413 Payload Too Large"
         case 500: httpCode = "500 Internal Server Error"
         default: httpCode = "\(code)"
         }
@@ -569,16 +681,10 @@ final class MCPServer {
         let httpResponse = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(bodyString.utf8.count)\r\n\r\n\(bodyString)"
         if let httpData = httpResponse.data(using: .utf8) {
             connection.send(content: httpData, completion: .contentProcessed { error in
-                if error != nil {
-                    connection.cancel()
-                }
+                connection.cancel()
             })
         } else {
             connection.cancel()
         }
-    }
-
-    private func send(response: [String: Any], connection: NWConnection) {
-        sendHTTP(response: response, connection: connection)
     }
 }

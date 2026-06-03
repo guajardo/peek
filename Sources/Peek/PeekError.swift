@@ -2,26 +2,20 @@ import Foundation
 
 enum PeekError: Error, CustomStringConvertible {
     case cameraNotAvailable
-    case permissionDenied
     case cameraBusy
     case encodingFailed
-    case invalidRecordingID
-    case serverNotRunning
+    case invalidArguments(String)
 
     var description: String {
         switch self {
         case .cameraNotAvailable:
             return "Camera not available"
-        case .permissionDenied:
-            return "Camera permission denied"
         case .cameraBusy:
             return "Camera is busy"
         case .encodingFailed:
             return "Failed to encode media"
-        case .invalidRecordingID:
-            return "Invalid recording ID"
-        case .serverNotRunning:
-            return "Server not running"
+        case .invalidArguments(let message):
+            return "Invalid arguments: \(message)"
         }
     }
 }
