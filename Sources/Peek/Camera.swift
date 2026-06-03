@@ -2,6 +2,8 @@ import AVFoundation
 import Foundation
 
 final class Camera {
+    private let postAdjustmentSettleDelay: TimeInterval = 0.75
+
     enum PermissionStatus {
         case granted
         case denied
@@ -352,10 +354,12 @@ final class Camera {
         while Date() < deadline {
             guard let device = captureDevice else { return }
             if !device.isAdjustingExposure && !device.isAdjustingWhiteBalance {
+                Thread.sleep(forTimeInterval: postAdjustmentSettleDelay)
                 return
             }
             Thread.sleep(forTimeInterval: 0.1)
         }
+        Thread.sleep(forTimeInterval: postAdjustmentSettleDelay)
     }
 
     private func snapshotURL() -> URL {

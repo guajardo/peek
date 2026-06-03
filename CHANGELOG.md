@@ -22,6 +22,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Remote binding option with explicit auth
 - Video clip trimming
 
+## [1.0.2] - 2026-06-03
+
+### Fixed
+
+- Added a lightweight post-adjustment camera settle delay to reduce dark cold-start snapshots.
+
 ## [1.0.1] - 2026-06-03
 
 ### Added
