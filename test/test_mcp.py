@@ -63,7 +63,27 @@ def send_raw_http(method, path, body, headers=None):
     s.connect((HOST, PORT))
     try:
         s.sendall(build_request(method, path, body, headers))
-    except BrokenPipeError:
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    resp = read_http_response(s)
+    s.close()
+    return resp
+
+def send_declared_length_http(method, path, declared_length, body=""):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect((HOST, PORT))
+    req = (
+        f"{method} {path} HTTP/1.1\r\n"
+        f"Host: {HOST}\r\n"
+        f"Content-Type: application/json\r\n"
+        f"Content-Length: {declared_length}\r\n"
+        "\r\n"
+        f"{body}"
+    ).encode()
+    try:
+        s.sendall(req)
+    except (BrokenPipeError, ConnectionResetError):
         pass
     resp = read_http_response(s)
     s.close()
@@ -204,8 +224,7 @@ print(resp.decode("utf-8", errors="replace")[:300])
 assert_status("404", resp, 404)
 
 print("\n=== Test 8: oversized body rejected ===")
-oversized = '{"jsonrpc":"2.0","id":8,"method":"initialize","params":"' + ("x" * (1024 * 1024 + 1)) + '"}'
-resp = send_raw_http("POST", "/mcp", oversized)
+resp = send_declared_length_http("POST", "/mcp", 1024 * 1024 + 1)
 status_code, head, body = parse_http_response(resp)
 if status_code != 413:
     print(f"oversized body: expected HTTP 413, got {status_code}", file=sys.stderr)
