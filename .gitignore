@@ -1,13 +1,19 @@
 # Build artifacts
 .build/
+.swiftpm/
+dist/
 *.o
 *.swiftdoc
 *.swiftsourceinfo
+*.dSYM/
+*.xcarchive/
 
 # Xcode
 *.xcodeproj/
 *.xcworkspace/
 DerivedData/
+xcuserdata/
+*.xcuserstate
 
 # App bundles
 *.app/
@@ -20,6 +26,7 @@ Peek.app/
 .vscode/
 .idea/
 *.sublime-*
+.hermes/
 
 # OS
 .DS_Store
@@ -33,3 +40,9 @@ test/
 
 # Secrets / local config (user must set these manually)
 config.json
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key

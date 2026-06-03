@@ -27,6 +27,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - Requested camera permission before starting capture warm-up so first install-time snapshots do not race macOS authorization.
+
+## [1.0.2] - 2026-06-03
+
+### Fixed
+
 - Added a lightweight post-adjustment camera settle delay to reduce dark cold-start snapshots.
 
 ## [1.0.1] - 2026-06-03
