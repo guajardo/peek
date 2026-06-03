@@ -26,8 +26,11 @@ final class MCPServer {
         guard listener == nil else { return }
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
+        let listenPort = NWEndpoint.Port(rawValue: port)!
+        let loopback = IPv4Address("127.0.0.1")!
+        params.requiredLocalEndpoint = .hostPort(host: .ipv4(loopback), port: listenPort)
 
-        let nwListener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
+        let nwListener = try NWListener(using: params)
         nwListener.stateUpdateHandler = { [weak self] state in
             print("[MCPServer] listener state changed to: \(state)")
             switch state {
