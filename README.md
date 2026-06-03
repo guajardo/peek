@@ -44,7 +44,7 @@ Menu bar macOS app that exposes your webcam as an MCP server. Any MCP client (Cl
 
 ```bash
 brew install guajardo/tap/peek
-open -a Peek
+Peek --start-server
 ```
 
 ### Build from source (for development)
@@ -52,8 +52,8 @@ open -a Peek
 ```bash
 git clone https://github.com/guajardo/peek.git
 cd peek
-swift build -c release
-.build/release/Peek &
+scripts/build_app_bundle.sh
+open dist/Peek.app
 ```
 
 ---
