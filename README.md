@@ -56,6 +56,12 @@ scripts/build_app_bundle.sh
 open dist/Peek.app
 ```
 
+### Verify release locally
+
+```bash
+scripts/verify_release.sh
+```
+
 ---
 
 ## Configure MCP Client
@@ -108,12 +114,13 @@ Peek/
 │   └── Assets.xcassets/
 ├── Package.swift
 ├── PeekFormula.rb
+├── scripts/
 ├── AGENTS.md              # AI agent guidelines
 ├── CHANGELOG.md
 └── README.md
 ```
 
-5 Swift files. Zero external dependencies.
+Core app code is 5 Swift files. Zero external dependencies.
 
 ---
 
