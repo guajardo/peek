@@ -19,13 +19,6 @@ final class Camera {
             }
         }
 
-        var compressionQuality: Float {
-            switch self {
-            case .low:    return 0.5
-            case .medium: return 0.7
-            case .high:   return 0.9
-            }
-        }
     }
 
     static let shared = Camera()
@@ -53,14 +46,6 @@ final class Camera {
         }
     }
 
-    func requestPermission(completion: @escaping (Bool) -> Void) {
-        AVCaptureDevice.requestAccess(for: .video) { granted in
-            DispatchQueue.main.async {
-                completion(granted)
-            }
-        }
-    }
-
     // MARK: - Session Management
 
     func startSession() throws {
@@ -71,7 +56,7 @@ final class Camera {
     }
 
     @discardableResult
-    private func startSessionIfNeeded() throws -> Bool {
+    private func startSessionIfNeeded(quality: Quality = .medium) throws -> Bool {
         try sessionQueue.sync {
             guard session == nil else { return false }
             let sess = AVCaptureSession()
@@ -81,7 +66,9 @@ final class Camera {
             }
 
             sess.beginConfiguration()
-            if sess.canSetSessionPreset(.photo) {
+            if sess.canSetSessionPreset(quality.preset) {
+                sess.sessionPreset = quality.preset
+            } else if sess.canSetSessionPreset(.photo) {
                 sess.sessionPreset = .photo
             }
 
@@ -144,7 +131,7 @@ final class Camera {
         let shouldStopAfterCapture = session == nil
 
         do {
-            try ensureSession()
+            try ensureSession(quality: quality)
         } catch {
             completion(.failure(error))
             return
@@ -178,7 +165,7 @@ final class Camera {
 
     func startRecording(completion: @escaping (Result<(UUID, Date), Error>) -> Void) {
         do {
-            try ensureSession()
+            try ensureSession(quality: .high)
         } catch {
             completion(.failure(error))
             return
@@ -238,7 +225,7 @@ final class Camera {
         let shouldStopAfterCapture = session == nil
 
         do {
-            try ensureSession()
+            try ensureSession(quality: quality)
         } catch {
             completion(.failure(error))
             return
@@ -294,8 +281,8 @@ final class Camera {
 
     // MARK: - Private Helpers
 
-    private func ensureSession() throws {
-        let didStart = try startSessionIfNeeded()
+    private func ensureSession(quality: Quality = .medium) throws {
+        let didStart = try startSessionIfNeeded(quality: quality)
         if didStart {
             waitForCameraWarmup()
         }

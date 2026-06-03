@@ -84,6 +84,12 @@ swift build -c release
 3. Grant camera permission when prompted
 4. MCP client connects and can call tools
 
+## Tool Behavior
+
+- `camera_snapshot` and `camera_frames` accept `quality` values of `low`, `medium`, or `high`.
+- Quality maps to the requested AVFoundation session preset. The actual dimensions still depend on the camera and macOS capture format; on the current verification machine, both `low` and `high` snapshots returned `1920x1080`.
+- Invalid `quality` values and invalid frame counts are rejected before camera work starts.
+
 ---
 
 ## Project Structure
