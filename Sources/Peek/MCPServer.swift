@@ -12,12 +12,22 @@ final class MCPServer {
         var buffer = Data()
     }
 
+    private enum HTTPRequestReadResult {
+        case request(Data)
+        case needMoreData
+        case badRequest
+        case payloadTooLarge
+    }
+
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.peek.mcp.server")
     private(set) var state: ServerState = .stopped
 
     private let camera = Camera.shared
     private let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
+    private let maxHeaderBytes = 16 * 1024
+    private let maxBodyBytes = 1024 * 1024
+    private let maxBufferedBytes = 1024 * 1024 + 16 * 1024
 
     // MARK: - Server Lifecycle
 
@@ -86,51 +96,91 @@ final class MCPServer {
     private func receive(on connection: NWConnection, context: ConnectionContext) {
         print("[MCPServer] receive() called")
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+
             print("[MCPServer] receive callback - data: \(data?.count ?? 0) bytes, error: \(String(describing: error))")
             if let data = data, !data.isEmpty {
                 context.buffer.append(data)
-                while let requestData = self?.nextHTTPRequest(from: context) {
-                    self?.process(data: requestData, connection: connection)
+                guard context.buffer.count <= self.maxBufferedBytes else {
+                    context.buffer.removeAll()
+                    self.sendHTTPError(connection: connection, code: 413, message: "Payload Too Large")
+                    return
+                }
+
+                parseLoop: while true {
+                    switch self.nextHTTPRequest(from: context) {
+                    case .request(let requestData):
+                        self.process(data: requestData, connection: connection)
+                    case .needMoreData:
+                        break parseLoop
+                    case .badRequest:
+                        self.sendHTTPError(connection: connection, code: 400, message: "Bad Request")
+                        return
+                    case .payloadTooLarge:
+                        self.sendHTTPError(connection: connection, code: 413, message: "Payload Too Large")
+                        return
+                    }
                 }
             }
             if isComplete || error != nil {
                 connection.cancel()
             } else {
-                self?.receive(on: connection, context: context)
+                self.receive(on: connection, context: context)
             }
         }
     }
 
-    private func nextHTTPRequest(from context: ConnectionContext) -> Data? {
+    private func nextHTTPRequest(from context: ConnectionContext) -> HTTPRequestReadResult {
         let headerSeparator = Data([13, 10, 13, 10])
         guard let separatorRange = context.buffer.range(of: headerSeparator) else {
-            return nil
+            if context.buffer.count > maxHeaderBytes {
+                context.buffer.removeAll()
+                return .payloadTooLarge
+            }
+            return .needMoreData
+        }
+
+        guard separatorRange.lowerBound <= maxHeaderBytes else {
+            context.buffer.removeAll()
+            return .payloadTooLarge
         }
 
         let headerEnd = separatorRange.upperBound
         let headerData = context.buffer.prefix(separatorRange.lowerBound)
         guard let headerText = String(data: headerData, encoding: .utf8) else {
             context.buffer.removeAll()
-            return nil
+            return .badRequest
         }
 
         var contentLength = 0
         for line in headerText.components(separatedBy: "\r\n").dropFirst() {
             if line.lowercased().hasPrefix("content-length:") {
                 let value = line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
-                contentLength = Int(value) ?? 0
+                guard let parsedContentLength = Int(value) else {
+                    context.buffer.removeAll()
+                    return .badRequest
+                }
+                contentLength = parsedContentLength
                 break
             }
         }
 
+        guard contentLength >= 0 && contentLength <= maxBodyBytes else {
+            context.buffer.removeAll()
+            return .payloadTooLarge
+        }
+
         let requestLength = headerEnd + contentLength
         guard context.buffer.count >= requestLength else {
-            return nil
+            return .needMoreData
         }
 
         let requestData = Data(context.buffer.prefix(requestLength))
         context.buffer.removeSubrange(0..<requestLength)
-        return requestData
+        return .request(requestData)
     }
 
     private func process(data: Data, connection: NWConnection) {
@@ -529,6 +579,7 @@ final class MCPServer {
         case 400: httpCode = "400 Bad Request"
         case 404: httpCode = "404 Not Found"
         case 405: httpCode = "405 Method Not Allowed"
+        case 413: httpCode = "413 Payload Too Large"
         case 500: httpCode = "500 Internal Server Error"
         default: httpCode = "\(code)"
         }

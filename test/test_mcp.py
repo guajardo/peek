@@ -61,7 +61,10 @@ def send_raw_http(method, path, body, headers=None):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(5)
     s.connect((HOST, PORT))
-    s.sendall(build_request(method, path, body, headers))
+    try:
+        s.sendall(build_request(method, path, body, headers))
+    except BrokenPipeError:
+        pass
     resp = read_http_response(s)
     s.close()
     return resp
@@ -182,3 +185,12 @@ resp = send_raw_http("POST", "/other", '{"jsonrpc":"2.0","id":5,"method":"initia
 print(f"Got {len(resp)} bytes")
 print(resp.decode("utf-8", errors="replace")[:300])
 assert_status("404", resp, 404)
+
+print("\n=== Test 8: oversized body rejected ===")
+oversized = '{"jsonrpc":"2.0","id":8,"method":"initialize","params":"' + ("x" * (1024 * 1024 + 1)) + '"}'
+resp = send_raw_http("POST", "/mcp", oversized)
+status_code, head, body = parse_http_response(resp)
+if status_code not in (400, 413):
+    print(f"oversized body: expected HTTP 400 or 413, got {status_code}", file=sys.stderr)
+    print(head, file=sys.stderr)
+    sys.exit(1)
