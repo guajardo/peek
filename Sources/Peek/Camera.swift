@@ -221,6 +221,11 @@ final class Camera {
     // MARK: - Frame Burst
 
     func captureFrames(count: Int, quality: Quality = .medium, completion: @escaping (Result<[Data], Error>) -> Void) {
+        guard (1...30).contains(count) else {
+            completion(.failure(PeekError.invalidArguments("count must be an integer from 1 through 30")))
+            return
+        }
+
         let shouldStopAfterCapture = session == nil
 
         do {

@@ -6,6 +6,7 @@ enum PeekError: Error, CustomStringConvertible {
     case cameraBusy
     case encodingFailed
     case invalidRecordingID
+    case invalidArguments(String)
     case serverNotRunning
 
     var description: String {
@@ -20,6 +21,8 @@ enum PeekError: Error, CustomStringConvertible {
             return "Failed to encode media"
         case .invalidRecordingID:
             return "Invalid recording ID"
+        case .invalidArguments(let message):
+            return "Invalid arguments: \(message)"
         case .serverNotRunning:
             return "Server not running"
         }

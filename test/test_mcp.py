@@ -122,6 +122,16 @@ def assert_tool_result(name, payload):
         print(f"{name}: missing result.structuredContent: {payload}", file=sys.stderr)
         sys.exit(1)
 
+def call_tool(tool_name, arguments, request_id=50):
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+    })
+    payload = assert_json_method_response(tool_name, send_raw_http("POST", "/mcp", body))
+    return payload["result"]
+
 print("=== Test 0: LAN address is not reachable ===")
 lan_ip = get_lan_ip()
 if lan_ip:
@@ -190,7 +200,21 @@ print("\n=== Test 8: oversized body rejected ===")
 oversized = '{"jsonrpc":"2.0","id":8,"method":"initialize","params":"' + ("x" * (1024 * 1024 + 1)) + '"}'
 resp = send_raw_http("POST", "/mcp", oversized)
 status_code, head, body = parse_http_response(resp)
-if status_code not in (400, 413):
-    print(f"oversized body: expected HTTP 400 or 413, got {status_code}", file=sys.stderr)
+if status_code != 413:
+    print(f"oversized body: expected HTTP 413, got {status_code}", file=sys.stderr)
     print(head, file=sys.stderr)
     sys.exit(1)
+
+print("\n=== Test 9: camera_frames rejects invalid counts ===")
+for bad_count in (0, -1, 31, 1000, 2.5, "10"):
+    result = call_tool("camera_frames", {"count": bad_count}, request_id=90)
+    if result.get("isError") is not True:
+        print(f"camera_frames count={bad_count!r}: expected isError true, got {result}", file=sys.stderr)
+        sys.exit(1)
+
+print("\n=== Test 10: tools reject invalid quality ===")
+for tool_name in ("camera_snapshot", "camera_frames"):
+    result = call_tool(tool_name, {"quality": "ultra"}, request_id=91)
+    if result.get("isError") is not True:
+        print(f"{tool_name}: expected invalid quality to be rejected, got {result}", file=sys.stderr)
+        sys.exit(1)

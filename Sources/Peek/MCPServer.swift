@@ -395,8 +395,12 @@ final class MCPServer {
     }
 
     private func handleSnapshot(id: Any?, arguments: [String: Any]) -> [String: Any] {
-        let qualityStr = arguments["quality"] as? String ?? "medium"
-        let quality = Camera.Quality(rawValue: qualityStr) ?? .medium
+        let quality: Camera.Quality
+        do {
+            quality = try parseQuality(arguments)
+        } catch {
+            return toolErrorResponse(id: id, message: String(describing: error))
+        }
 
         var response: [String: Any]!
         let sem = DispatchSemaphore(value: 0)
@@ -483,9 +487,14 @@ final class MCPServer {
     }
 
     private func handleFrames(id: Any?, arguments: [String: Any]) -> [String: Any] {
-        let count = arguments["count"] as? Int ?? 10
-        let qualityStr = arguments["quality"] as? String ?? "medium"
-        let quality = Camera.Quality(rawValue: qualityStr) ?? .medium
+        let count: Int
+        let quality: Camera.Quality
+        do {
+            count = try parseFrameCount(arguments)
+            quality = try parseQuality(arguments)
+        } catch {
+            return toolErrorResponse(id: id, message: String(describing: error))
+        }
 
         var response: [String: Any]!
         let sem = DispatchSemaphore(value: 0)
@@ -511,6 +520,41 @@ final class MCPServer {
             return toolErrorResponse(id: id, message: "Operation timed out")
         }
         return response
+    }
+
+    private func parseQuality(_ arguments: [String: Any]) throws -> Camera.Quality {
+        guard let value = arguments["quality"] else {
+            return .medium
+        }
+        guard let qualityString = value as? String,
+              let quality = Camera.Quality(rawValue: qualityString) else {
+            throw PeekError.invalidArguments("quality must be one of: low, medium, high")
+        }
+        return quality
+    }
+
+    private func parseFrameCount(_ arguments: [String: Any]) throws -> Int {
+        guard let value = arguments["count"] else {
+            return 10
+        }
+
+        let count: Int
+        if let intValue = value as? Int {
+            count = intValue
+        } else if let numberValue = value as? NSNumber, !(value is Bool) {
+            let doubleValue = numberValue.doubleValue
+            guard doubleValue.rounded(.towardZero) == doubleValue else {
+                throw PeekError.invalidArguments("count must be an integer from 1 through 30")
+            }
+            count = numberValue.intValue
+        } else {
+            throw PeekError.invalidArguments("count must be an integer from 1 through 30")
+        }
+
+        guard (1...30).contains(count) else {
+            throw PeekError.invalidArguments("count must be an integer from 1 through 30")
+        }
+        return count
     }
 
     // MARK: - Response Helpers
