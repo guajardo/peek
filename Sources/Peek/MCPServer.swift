@@ -272,7 +272,7 @@ final class MCPServer {
                 "capabilities": [:],
                 "serverInfo": [
                     "name": "Peek",
-                    "version": "1.0.0"
+                    "version": "1.0.1"
                 ]
             ]
         ]
