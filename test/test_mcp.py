@@ -231,6 +231,10 @@ if status_payload.get("camera_permission") == "granted":
         if second.get("isError") is not True:
             print(f"duplicate recording: expected second start to fail, got {second}", file=sys.stderr)
             sys.exit(1)
+        error_message = second.get("structuredContent", {}).get("error", "")
+        if "Camera is busy" not in error_message:
+            print(f"duplicate recording: expected Camera is busy error, got {second}", file=sys.stderr)
+            sys.exit(1)
         recording_id = first["structuredContent"]["recording_id"]
         call_tool("camera_stop_recording", {"recording_id": recording_id}, request_id=113)
 else:

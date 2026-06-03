@@ -177,14 +177,6 @@ final class Camera {
     // MARK: - Video Recording
 
     func startRecording(completion: @escaping (Result<(UUID, Date), Error>) -> Void) {
-        let isRecording = sessionQueue.sync {
-            activeRecording != nil
-        }
-        guard !isRecording else {
-            completion(.failure(PeekError.cameraBusy))
-            return
-        }
-
         do {
             try ensureSession()
         } catch {
@@ -201,9 +193,18 @@ final class Camera {
         let outputURL = videoURL(for: recordingID)
         let recorder = VideoFrameRecorder(recordingID: recordingID, outputURL: outputURL)
 
-        sessionQueue.sync {
+        let didClaimRecording = sessionQueue.sync {
+            guard activeRecording == nil else {
+                return false
+            }
             activeRecording = recorder
+            return true
         }
+        guard didClaimRecording else {
+            completion(.failure(PeekError.cameraBusy))
+            return
+        }
+
         video.setSampleBufferDelegate(recorder, queue: recorder.queue)
 
         completion(.success((recordingID, Date())))
