@@ -5,9 +5,14 @@ class Peek <Formula
   version "1.0.0"
 
   depends_on :macos => :big_sur
+  depends_on xcode: ["13.0", :build]
 
   def install
-    system "swift", "build", "-c", "release"
+    system "swift", "build", "-c", "release", "--disable-sandbox"
     bin.install ".build/release/Peek"
+  end
+
+  test do
+    assert_match "Peek", shell_output("#{bin}/Peek --help 2>&1", 0)
   end
 end
