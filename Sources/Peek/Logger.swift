@@ -34,14 +34,13 @@ final class Logger {
                 guard let line = String(data: data, encoding: .utf8) else { return }
                 let lineWithNewline = line + "\n"
                 guard let lineData = lineWithNewline.data(using: .utf8) else { return }
-                if FileManager.default.fileExists(atPath: self.logURL.path) {
-                    if let handle = FileHandle(forWritingAtPath: self.logURL.path) {
-                        handle.seekToEndOfFile()
-                        try? handle.write(lineData)
-                        handle.closeFile()
-                    }
+                if FileManager.default.fileExists(atPath: self.logURL.path),
+                   let handle = FileHandle(forWritingAtPath: self.logURL.path) {
+                    defer { try? handle.close() }
+                    try handle.seekToEnd()
+                    try handle.write(contentsOf: lineData)
                 } else {
-                    try? lineData.write(to: self.logURL)
+                    try lineData.write(to: self.logURL, options: [.atomic])
                 }
             } catch {
                 // Silently ignore logging errors

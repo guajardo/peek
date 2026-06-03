@@ -341,9 +341,13 @@ final class MCPServer {
 
         switch toolName {
         case "peek_ping":
-            sendHTTP(response: handlePing(id: id, arguments: arguments), connection: connection)
+            let response = handlePing(id: id, arguments: arguments)
+            audit(tool: "peek_ping", ok: true)
+            sendHTTP(response: response, connection: connection)
         case "camera_status":
-            sendHTTP(response: handleCameraStatus(id: id, arguments: arguments), connection: connection)
+            let response = handleCameraStatus(id: id, arguments: arguments)
+            audit(tool: "camera_status", ok: true)
+            sendHTTP(response: response, connection: connection)
         case "camera_snapshot":
             handleSnapshot(id: id, arguments: arguments, connection: connection)
         case "camera_start_recording":
@@ -353,11 +357,16 @@ final class MCPServer {
         case "camera_frames":
             handleFrames(id: id, arguments: arguments, connection: connection)
         default:
+            audit(tool: toolName, ok: false, extras: ["error": "Tool not found"])
             sendHTTP(response: errorResponse(id: id, code: -32601, message: "Tool not found: \(toolName)"), connection: connection)
         }
     }
 
     // MARK: - Tool Handlers
+
+    private func audit(tool: String, ok: Bool, extras: [String: Any] = [:]) {
+        Logger.shared.log(tool: tool, ok: ok, extras: extras)
+    }
 
     private func handlePing(id: Any?, arguments: [String: Any]) -> [String: Any] {
         let payload: [String: Any] = [
@@ -390,6 +399,7 @@ final class MCPServer {
         do {
             quality = try parseQuality(arguments)
         } catch {
+            audit(tool: "camera_snapshot", ok: false, extras: ["error": String(describing: error)])
             sendHTTP(response: toolErrorResponse(id: id, message: String(describing: error)), connection: connection)
             return
         }
@@ -400,6 +410,7 @@ final class MCPServer {
                 switch result {
                 case .success(let url):
                     let dimensions = self.imageDimensions(at: url) ?? (width: 1920, height: 1080)
+                    self.audit(tool: "camera_snapshot", ok: true, extras: ["path": url.path])
                     response = self.toolResultResponse(id: id, payload: [
                         "ok": true,
                         "image_path": url.path,
@@ -407,6 +418,7 @@ final class MCPServer {
                         "height": dimensions.height
                     ])
                 case .failure(let error):
+                    self.audit(tool: "camera_snapshot", ok: false, extras: ["error": String(describing: error)])
                     response = self.toolErrorResponse(id: id, message: String(describing: error))
                 }
                 self.sendHTTP(response: response, connection: connection)
@@ -420,12 +432,14 @@ final class MCPServer {
                 let response: [String: Any]
                 switch result {
                 case .success(let (recordingID, startedAt)):
+                    self.audit(tool: "camera_start_recording", ok: true, extras: ["recording_id": recordingID.uuidString])
                     response = self.toolResultResponse(id: id, payload: [
                         "ok": true,
                         "recording_id": recordingID.uuidString,
                         "started_at": ISO8601DateFormatter().string(from: startedAt)
                     ])
                 case .failure(let error):
+                    self.audit(tool: "camera_start_recording", ok: false, extras: ["error": String(describing: error)])
                     response = self.toolErrorResponse(id: id, message: String(describing: error))
                 }
                 self.sendHTTP(response: response, connection: connection)
@@ -436,6 +450,7 @@ final class MCPServer {
     private func handleStopRecording(id: Any?, arguments: [String: Any], connection: NWConnection) {
         guard let recordingIDStr = arguments["recording_id"] as? String,
               let recordingID = UUID(uuidString: recordingIDStr) else {
+            audit(tool: "camera_stop_recording", ok: false, extras: ["error": "Invalid recording_id"])
             sendHTTP(response: errorResponse(id: id, code: -32602, message: "Invalid recording_id"), connection: connection)
             return
         }
@@ -445,12 +460,14 @@ final class MCPServer {
                 let response: [String: Any]
                 switch result {
                 case .success(let (url, duration)):
+                    self.audit(tool: "camera_stop_recording", ok: true, extras: ["path": url.path])
                     response = self.toolResultResponse(id: id, payload: [
                         "ok": true,
                         "video_path": url.path,
                         "duration_seconds": duration
                     ])
                 case .failure(let error):
+                    self.audit(tool: "camera_stop_recording", ok: false, extras: ["error": String(describing: error)])
                     response = self.toolErrorResponse(id: id, message: String(describing: error))
                 }
                 self.sendHTTP(response: response, connection: connection)
@@ -465,6 +482,7 @@ final class MCPServer {
             count = try parseFrameCount(arguments)
             quality = try parseQuality(arguments)
         } catch {
+            audit(tool: "camera_frames", ok: false, extras: ["error": String(describing: error)])
             sendHTTP(response: toolErrorResponse(id: id, message: String(describing: error)), connection: connection)
             return
         }
@@ -475,12 +493,14 @@ final class MCPServer {
                 switch result {
                 case .success(let framesData):
                     let base64Frames = framesData.map { $0.base64EncodedString() }
+                    self.audit(tool: "camera_frames", ok: true, extras: ["count": base64Frames.count])
                     response = self.toolResultResponse(id: id, payload: [
                         "ok": true,
                         "frames": base64Frames,
                         "count": base64Frames.count
                     ])
                 case .failure(let error):
+                    self.audit(tool: "camera_frames", ok: false, extras: ["error": String(describing: error)])
                     response = self.toolErrorResponse(id: id, message: String(describing: error))
                 }
                 self.sendHTTP(response: response, connection: connection)
@@ -640,9 +660,5 @@ final class MCPServer {
         } else {
             connection.cancel()
         }
-    }
-
-    private func send(response: [String: Any], connection: NWConnection) {
-        sendHTTP(response: response, connection: connection)
     }
 }
