@@ -132,6 +132,13 @@ def call_tool(tool_name, arguments, request_id=50):
     payload = assert_json_method_response(tool_name, send_raw_http("POST", "/mcp", body))
     return payload["result"]
 
+def timed_initialize():
+    start = time.time()
+    resp = send_raw_http("POST", "/mcp", initialize_body, {"Accept": "application/json, text/event-stream"})
+    elapsed = time.time() - start
+    assert_json_method_response("timed initialize", resp)
+    return elapsed
+
 print("=== Test 0: LAN address is not reachable ===")
 lan_ip = get_lan_ip()
 if lan_ip:
@@ -239,3 +246,15 @@ if status_payload.get("camera_permission") == "granted":
         call_tool("camera_stop_recording", {"recording_id": recording_id}, request_id=113)
 else:
     print("duplicate recording test skipped: camera permission is not granted")
+
+print("\n=== Test 12: initialize remains fast during invalid camera work ===")
+start = time.time()
+result = call_tool("camera_frames", {"count": 31}, request_id=120)
+if result.get("isError") is not True:
+    print(f"expected invalid camera_frames to fail quickly, got {result}", file=sys.stderr)
+    sys.exit(1)
+elapsed = timed_initialize()
+if elapsed > 1.0:
+    print(f"initialize took too long after camera error: {elapsed:.2f}s", file=sys.stderr)
+    sys.exit(1)
+print(f"fast initialize check passed in {elapsed:.2f}s")

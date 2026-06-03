@@ -21,6 +21,7 @@ final class MCPServer {
 
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.peek.mcp.server")
+    private let cameraWorkQueue = DispatchQueue(label: "com.peek.mcp.camera-work", qos: .userInitiated)
     private(set) var state: ServerState = .stopped
 
     private let camera = Camera.shared
@@ -32,7 +33,6 @@ final class MCPServer {
     // MARK: - Server Lifecycle
 
     func start(port: UInt16 = 8765) throws {
-        print("[MCPServer] start() called with port \(port)")
         guard listener == nil else { return }
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
@@ -42,7 +42,6 @@ final class MCPServer {
 
         let nwListener = try NWListener(using: params)
         nwListener.stateUpdateHandler = { [weak self] state in
-            print("[MCPServer] listener state changed to: \(state)")
             switch state {
             case .ready:
                 self?.state = .running(port: port)
@@ -55,12 +54,10 @@ final class MCPServer {
         }
 
         nwListener.newConnectionHandler = { [weak self] connection in
-            print("[MCPServer] new connection received")
             self?.handle(connection: connection)
         }
 
         listener = nwListener
-        print("[MCPServer] starting listener on port \(port)")
         nwListener.start(queue: queue)
         state = .running(port: port)
     }
@@ -74,34 +71,27 @@ final class MCPServer {
     // MARK: - Connection Handling
 
     private func handle(connection: NWConnection) {
-        print("[MCPServer] handle() called, connection state: \(connection.state)")
         let context = ConnectionContext()
         connection.stateUpdateHandler = { state in
-            print("[MCPServer] connection state changed to: \(state)")
             switch state {
             case .ready:
                 self.receive(on: connection, context: context)
-            case .failed(let err):
-                print("[MCPServer] connection failed: \(err)")
+            case .failed:
                 connection.cancel()
-            case .cancelled:
-                print("[MCPServer] connection cancelled")
             default:
-                print("[MCPServer] connection in unexpected state, not cancelling yet")
+                break
             }
         }
         connection.start(queue: queue)
     }
 
     private func receive(on connection: NWConnection, context: ConnectionContext) {
-        print("[MCPServer] receive() called")
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
             guard let self else {
                 connection.cancel()
                 return
             }
 
-            print("[MCPServer] receive callback - data: \(data?.count ?? 0) bytes, error: \(String(describing: error))")
             if let data = data, !data.isEmpty {
                 context.buffer.append(data)
                 guard context.buffer.count <= self.maxBufferedBytes else {
@@ -255,7 +245,7 @@ final class MCPServer {
         case "tools/list":
             sendHTTP(response: handleToolsList(id: id), connection: connection)
         case "tools/call":
-            sendHTTP(response: handleToolCall(id: id, params: params), connection: connection)
+            processToolCall(id: id, params: params, connection: connection)
         default:
             sendHTTPError(connection: connection, code: 404, message: "Method not found", id: id)
         }
@@ -340,29 +330,30 @@ final class MCPServer {
         ]
     }
 
-    private func handleToolCall(id: Any?, params: [String: Any]?) -> [String: Any] {
+    private func processToolCall(id: Any?, params: [String: Any]?, connection: NWConnection) {
         guard let params = params,
               let toolName = params["name"] as? String else {
-            return errorResponse(id: id, code: -32602, message: "Invalid params")
+            sendHTTP(response: errorResponse(id: id, code: -32602, message: "Invalid params"), connection: connection)
+            return
         }
 
         let arguments = params["arguments"] as? [String: Any] ?? [:]
 
         switch toolName {
         case "peek_ping":
-            return handlePing(id: id, arguments: arguments)
+            sendHTTP(response: handlePing(id: id, arguments: arguments), connection: connection)
         case "camera_status":
-            return handleCameraStatus(id: id, arguments: arguments)
+            sendHTTP(response: handleCameraStatus(id: id, arguments: arguments), connection: connection)
         case "camera_snapshot":
-            return handleSnapshot(id: id, arguments: arguments)
+            handleSnapshot(id: id, arguments: arguments, connection: connection)
         case "camera_start_recording":
-            return handleStartRecording(id: id, arguments: arguments)
+            handleStartRecording(id: id, arguments: arguments, connection: connection)
         case "camera_stop_recording":
-            return handleStopRecording(id: id, arguments: arguments)
+            handleStopRecording(id: id, arguments: arguments, connection: connection)
         case "camera_frames":
-            return handleFrames(id: id, arguments: arguments)
+            handleFrames(id: id, arguments: arguments, connection: connection)
         default:
-            return errorResponse(id: id, code: -32601, message: "Tool not found: \(toolName)")
+            sendHTTP(response: errorResponse(id: id, code: -32601, message: "Tool not found: \(toolName)"), connection: connection)
         }
     }
 
@@ -394,132 +385,107 @@ final class MCPServer {
         return toolResultResponse(id: id, payload: payload)
     }
 
-    private func handleSnapshot(id: Any?, arguments: [String: Any]) -> [String: Any] {
+    private func handleSnapshot(id: Any?, arguments: [String: Any], connection: NWConnection) {
         let quality: Camera.Quality
         do {
             quality = try parseQuality(arguments)
         } catch {
-            return toolErrorResponse(id: id, message: String(describing: error))
+            sendHTTP(response: toolErrorResponse(id: id, message: String(describing: error)), connection: connection)
+            return
         }
 
-        var response: [String: Any]!
-        let sem = DispatchSemaphore(value: 0)
-
-        camera.takeSnapshot(quality: quality) { result in
-            switch result {
-            case .success(let url):
-                let dimensions = self.imageDimensions(at: url) ?? (width: 1920, height: 1080)
-                let payload: [String: Any] = [
-                    "ok": true,
-                    "image_path": url.path,
-                    "width": dimensions.width,
-                    "height": dimensions.height
-                ]
-                response = self.toolResultResponse(id: id, payload: payload)
-            case .failure(let error):
-                response = self.toolErrorResponse(id: id, message: String(describing: error))
+        cameraWorkQueue.async {
+            self.camera.takeSnapshot(quality: quality) { result in
+                let response: [String: Any]
+                switch result {
+                case .success(let url):
+                    let dimensions = self.imageDimensions(at: url) ?? (width: 1920, height: 1080)
+                    response = self.toolResultResponse(id: id, payload: [
+                        "ok": true,
+                        "image_path": url.path,
+                        "width": dimensions.width,
+                        "height": dimensions.height
+                    ])
+                case .failure(let error):
+                    response = self.toolErrorResponse(id: id, message: String(describing: error))
+                }
+                self.sendHTTP(response: response, connection: connection)
             }
-            sem.signal()
         }
-
-        let timeoutResult = sem.wait(timeout: .now() + 10)
-        if timeoutResult == .timedOut {
-            return toolErrorResponse(id: id, message: "Operation timed out")
-        }
-        return response
     }
 
-    private func handleStartRecording(id: Any?, arguments: [String: Any]) -> [String: Any] {
-        var response: [String: Any]!
-        let sem = DispatchSemaphore(value: 0)
-
-        camera.startRecording { result in
-            switch result {
-            case .success(let (recordingID, startedAt)):
-                let payload: [String: Any] = [
-                    "ok": true,
-                    "recording_id": recordingID.uuidString,
-                    "started_at": ISO8601DateFormatter().string(from: startedAt)
-                ]
-                response = self.toolResultResponse(id: id, payload: payload)
-            case .failure(let error):
-                response = self.toolErrorResponse(id: id, message: String(describing: error))
+    private func handleStartRecording(id: Any?, arguments: [String: Any], connection: NWConnection) {
+        cameraWorkQueue.async {
+            self.camera.startRecording { result in
+                let response: [String: Any]
+                switch result {
+                case .success(let (recordingID, startedAt)):
+                    response = self.toolResultResponse(id: id, payload: [
+                        "ok": true,
+                        "recording_id": recordingID.uuidString,
+                        "started_at": ISO8601DateFormatter().string(from: startedAt)
+                    ])
+                case .failure(let error):
+                    response = self.toolErrorResponse(id: id, message: String(describing: error))
+                }
+                self.sendHTTP(response: response, connection: connection)
             }
-            sem.signal()
         }
-
-        let timeoutResult = sem.wait(timeout: .now() + 10)
-        if timeoutResult == .timedOut {
-            return toolErrorResponse(id: id, message: "Operation timed out")
-        }
-        return response
     }
 
-    private func handleStopRecording(id: Any?, arguments: [String: Any]) -> [String: Any] {
+    private func handleStopRecording(id: Any?, arguments: [String: Any], connection: NWConnection) {
         guard let recordingIDStr = arguments["recording_id"] as? String,
               let recordingID = UUID(uuidString: recordingIDStr) else {
-            return errorResponse(id: id, code: -32602, message: "Invalid recording_id")
+            sendHTTP(response: errorResponse(id: id, code: -32602, message: "Invalid recording_id"), connection: connection)
+            return
         }
 
-        var response: [String: Any]!
-        let sem = DispatchSemaphore(value: 0)
-
-        camera.stopRecording(recordingID: recordingID) { result in
-            switch result {
-            case .success(let (url, duration)):
-                let payload: [String: Any] = [
-                    "ok": true,
-                    "video_path": url.path,
-                    "duration_seconds": duration
-                ]
-                response = self.toolResultResponse(id: id, payload: payload)
-            case .failure(let error):
-                response = self.toolErrorResponse(id: id, message: String(describing: error))
+        cameraWorkQueue.async {
+            self.camera.stopRecording(recordingID: recordingID) { result in
+                let response: [String: Any]
+                switch result {
+                case .success(let (url, duration)):
+                    response = self.toolResultResponse(id: id, payload: [
+                        "ok": true,
+                        "video_path": url.path,
+                        "duration_seconds": duration
+                    ])
+                case .failure(let error):
+                    response = self.toolErrorResponse(id: id, message: String(describing: error))
+                }
+                self.sendHTTP(response: response, connection: connection)
             }
-            sem.signal()
         }
-
-        let timeoutResult = sem.wait(timeout: .now() + 10)
-        if timeoutResult == .timedOut {
-            return toolErrorResponse(id: id, message: "Operation timed out")
-        }
-        return response
     }
 
-    private func handleFrames(id: Any?, arguments: [String: Any]) -> [String: Any] {
+    private func handleFrames(id: Any?, arguments: [String: Any], connection: NWConnection) {
         let count: Int
         let quality: Camera.Quality
         do {
             count = try parseFrameCount(arguments)
             quality = try parseQuality(arguments)
         } catch {
-            return toolErrorResponse(id: id, message: String(describing: error))
+            sendHTTP(response: toolErrorResponse(id: id, message: String(describing: error)), connection: connection)
+            return
         }
 
-        var response: [String: Any]!
-        let sem = DispatchSemaphore(value: 0)
-
-        camera.captureFrames(count: count, quality: quality) { result in
-            switch result {
-            case .success(let framesData):
-                let base64Frames = framesData.map { $0.base64EncodedString() }
-                let payload: [String: Any] = [
-                    "ok": true,
-                    "frames": base64Frames,
-                    "count": base64Frames.count
-                ]
-                response = self.toolResultResponse(id: id, payload: payload)
-            case .failure(let error):
-                response = self.toolErrorResponse(id: id, message: String(describing: error))
+        cameraWorkQueue.async {
+            self.camera.captureFrames(count: count, quality: quality) { result in
+                let response: [String: Any]
+                switch result {
+                case .success(let framesData):
+                    let base64Frames = framesData.map { $0.base64EncodedString() }
+                    response = self.toolResultResponse(id: id, payload: [
+                        "ok": true,
+                        "frames": base64Frames,
+                        "count": base64Frames.count
+                    ])
+                case .failure(let error):
+                    response = self.toolErrorResponse(id: id, message: String(describing: error))
+                }
+                self.sendHTTP(response: response, connection: connection)
             }
-            sem.signal()
         }
-
-        let timeoutResult = sem.wait(timeout: .now() + 10)
-        if timeoutResult == .timedOut {
-            return toolErrorResponse(id: id, message: "Operation timed out")
-        }
-        return response
     }
 
     private func parseQuality(_ arguments: [String: Any]) throws -> Camera.Quality {
